@@ -6,7 +6,12 @@
     "project_id": "proj-1",
     "payload": {
       "file": "src/auth.ts"
-    }
+    },
+    "path": "src/auth.ts",
+    "branch": "main",
+    "metadata": null,
+    "collector_version": "0.1.0",
+    "created_at": "2026-05-30T10:20:01Z"
   },
   {
     "id": "d0e1cfa1-0361-419b-ba2d-488f7b794f83",
@@ -15,7 +20,12 @@
     "project_id": "proj-1",
     "payload": {
       "result": "success"
-    }
+    },
+    "path": null,
+    "branch": "main",
+    "metadata": null,
+    "collector_version": "0.1.0",
+    "created_at": "2026-05-30T10:25:02Z"
   },
   {
     "id": "6701bea0-d29a-4c28-98e3-4f9deebc84bf",
@@ -24,7 +34,12 @@
     "project_id": "proj-1",
     "payload": {
       "message": "Update auth"
-    }
+    },
+    "path": null,
+    "branch": "main",
+    "metadata": null,
+    "collector_version": "0.1.0",
+    "created_at": "2026-05-30T10:30:05Z"
   },
   {
     "id": "764b8555-5c17-48f8-b3bf-7c4f4a317777",
@@ -33,6 +48,11 @@
     "project_id": "proj-1",
     "payload": {
       "file": "src/main.ts"
-    }
+    },
+    "path": "src/main.ts",
+    "branch": "main",
+    "metadata": null,
+    "collector_version": "0.1.0",
+    "created_at": "2026-05-30T12:00:01Z"
   }
 ]
