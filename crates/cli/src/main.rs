@@ -140,26 +140,31 @@ fn main() -> Result<()> {
             ReplayCommands::Session { id } => {
                 let db_path = get_db_path();
                 let store = EventStore::new(&db_path)?;
-                let events = store.get_events()?;
                 
-                let engine = SessionEngine::new();
-                let sessions = engine.rebuild_sessions(events)?;
+                let mut actual_id = id.clone();
                 
-                let target_session = sessions.iter().find(|s| s.id.to_string() == *id)
-                    .or_else(|| {
-                        if let Ok(idx) = id.parse::<usize>() {
-                            sessions.get(idx)
-                        } else {
-                            None
-                        }
-                    });
-                    
-                match target_session {
-                    Some(s) => {
-                        let replay = ReplayEngine::new();
-                        replay.replay_session(s)?;
+                if let Ok(idx) = id.parse::<i64>() {
+                    let mut stmt = store.conn.prepare("SELECT id FROM sessions ORDER BY start_time ASC LIMIT 1 OFFSET ?1")?;
+                    let mut rows = stmt.query(rusqlite::params![idx])?;
+                    if let Some(row) = rows.next()? {
+                        let row_id: String = row.get(0)?;
+                        actual_id = row_id;
                     }
-                    None => println!("Session not found."),
+                }
+                
+                if let Some((start_time, end_time)) = store.get_session_info(&actual_id)? {
+                    let events = store.get_events_by_session(&actual_id)?;
+                    let s = session_engine::Session {
+                        id: uuid::Uuid::parse_str(&actual_id).unwrap_or_default(),
+                        start_time,
+                        end_time,
+                        events,
+                    };
+                    
+                    let replay = ReplayEngine::new();
+                    replay.replay_session(&s)?;
+                } else {
+                    println!("Session not found.");
                 }
             }
         }

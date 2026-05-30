@@ -178,6 +178,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "session-engine",
+ "uuid",
 ]
 
 [[package]]

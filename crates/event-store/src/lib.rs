@@ -219,4 +219,35 @@ impl EventStore {
         }
         Ok(events)
     }
+
+    pub fn get_session_info(&self, session_id: &str) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>> {
+        let mut stmt = self.conn.prepare("SELECT start_time, end_time FROM sessions WHERE id = ?1")?;
+        let mut rows = stmt.query(params![session_id])?;
+        if let Some(row) = rows.next()? {
+            let start: String = row.get(0)?;
+            let end: String = row.get(1)?;
+            let start_dt = DateTime::parse_from_rfc3339(&start).unwrap().with_timezone(&Utc);
+            let end_dt = DateTime::parse_from_rfc3339(&end).unwrap().with_timezone(&Utc);
+            Ok(Some((start_dt, end_dt)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_events_by_session(&self, session_id: &str) -> Result<Vec<Event>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.id, e.timestamp, e.event_type, e.project_id, e.payload, e.path, e.branch, e.metadata, e.collector_version, e.created_at
+             FROM events e
+             INNER JOIN session_assignments sa ON e.id = sa.event_id
+             WHERE sa.session_id = ?1
+             ORDER BY sa.timestamp ASC"
+        )?;
+        let event_iter = stmt.query_map(params![session_id], Self::map_row_to_event)?;
+        
+        let mut events = Vec::new();
+        for e in event_iter {
+            events.push(e?);
+        }
+        Ok(events)
+    }
 }
