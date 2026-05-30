@@ -1,0 +1,11 @@
+[package]
+name = "session-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+event-store = { path = "../event-store" }
+chrono = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }

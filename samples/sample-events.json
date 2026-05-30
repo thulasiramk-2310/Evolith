@@ -1,0 +1,38 @@
+[
+  {
+    "id": "e2ba7e10-1c39-4d92-a15e-1f71dfacfb5a",
+    "timestamp": "2026-05-30T10:20:00Z",
+    "event_type": "file.modified",
+    "project_id": "proj-1",
+    "payload": {
+      "file": "src/auth.ts"
+    }
+  },
+  {
+    "id": "d0e1cfa1-0361-419b-ba2d-488f7b794f83",
+    "timestamp": "2026-05-30T10:25:00Z",
+    "event_type": "test.run",
+    "project_id": "proj-1",
+    "payload": {
+      "result": "success"
+    }
+  },
+  {
+    "id": "6701bea0-d29a-4c28-98e3-4f9deebc84bf",
+    "timestamp": "2026-05-30T10:30:00Z",
+    "event_type": "git.commit",
+    "project_id": "proj-1",
+    "payload": {
+      "message": "Update auth"
+    }
+  },
+  {
+    "id": "764b8555-5c17-48f8-b3bf-7c4f4a317777",
+    "timestamp": "2026-05-30T12:00:00Z",
+    "event_type": "file.modified",
+    "project_id": "proj-1",
+    "payload": {
+      "file": "src/main.ts"
+    }
+  }
+]

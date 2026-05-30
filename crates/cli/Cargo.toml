@@ -1,0 +1,16 @@
+[package]
+name = "cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "devreplay"
+path = "src/main.rs"
+
+[dependencies]
+event-store = { path = "../event-store" }
+session-engine = { path = "../session-engine" }
+replay-engine = { path = "../replay-engine" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }

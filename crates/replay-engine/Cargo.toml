@@ -1,0 +1,10 @@
+[package]
+name = "replay-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+event-store = { path = "../event-store" }
+session-engine = { path = "../session-engine" }
+chrono = { workspace = true }
+anyhow = { workspace = true }
