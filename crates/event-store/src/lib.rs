@@ -33,34 +33,92 @@ pub enum EventType {
 }
 
 pub struct EventStore {
-    conn: Connection,
+    pub conn: Connection,
 }
 
 impl EventStore {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let conn = Connection::open(path)?;
-        Self::init_db(&conn)?;
+        let mut conn = Connection::open(path)?;
+        Self::apply_migrations(&mut conn)?;
         Ok(Self { conn })
     }
 
-    fn init_db(conn: &Connection) -> Result<()> {
-        conn.execute_batch("
-            CREATE TABLE IF NOT EXISTS events (
-                id TEXT PRIMARY KEY,
-                timestamp TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                project_id TEXT NOT NULL,
-                payload TEXT NOT NULL,
-                path TEXT,
-                branch TEXT,
-                metadata TEXT,
-                collector_version TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_events_project ON events(project_id);
-            CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
-        ")?;
+    fn apply_migrations(conn: &mut Connection) -> Result<()> {
+        let tx = conn.transaction()?;
+        
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+
+        let current_version: i64 = match tx.query_row(
+            "SELECT MAX(version) FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        ) {
+            Ok(v) => v,
+            Err(rusqlite::Error::QueryReturnedNoRows) => 0,
+            Err(_) => 0,
+        };
+
+        if current_version < 1 {
+            tx.execute_batch("
+                CREATE TABLE IF NOT EXISTS events (
+                    id TEXT PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    path TEXT,
+                    branch TEXT,
+                    metadata TEXT,
+                    collector_version TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_events_project ON events(project_id);
+                CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
+            ")?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+        }
+
+        if current_version < 2 {
+            tx.execute_batch("
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT NOT NULL,
+                    event_count INTEGER NOT NULL
+                );
+                
+                CREATE TABLE IF NOT EXISTS session_assignments (
+                    session_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    PRIMARY KEY (session_id, event_id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                    FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
+                CREATE INDEX IF NOT EXISTS idx_session_assignments_session ON session_assignments(session_id);
+                CREATE INDEX IF NOT EXISTS idx_session_assignments_event ON session_assignments(event_id);
+            ")?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (2, ?)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+        }
+
+        tx.commit()?;
         Ok(())
     }
 
@@ -90,7 +148,7 @@ impl EventStore {
         Ok(())
     }
 
-    fn map_row_to_event(row: &Row) -> rusqlite::Result<Event> {
+    pub fn map_row_to_event(row: &Row) -> rusqlite::Result<Event> {
         let id: String = row.get(0)?;
         let ts: String = row.get(1)?;
         let ev_type: String = row.get(2)?;

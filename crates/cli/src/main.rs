@@ -93,15 +93,47 @@ fn main() -> Result<()> {
         Commands::Sessions { subcmd } => match subcmd {
             SessionCommands::Rebuild => {
                 let db_path = get_db_path();
-                let store = EventStore::new(&db_path)?;
+                let mut store = EventStore::new(&db_path)?;
                 let events = store.get_events()?;
                 
                 let engine = SessionEngine::new();
                 let sessions = engine.rebuild_sessions(events)?;
                 println!("Rebuilt {} sessions:", sessions.len());
+                
+                let tx = store.conn.transaction()?;
+                
                 for (i, s) in sessions.iter().enumerate() {
-                    println!("Session {}: {} ({} events)", i, s.id, s.events.len());
+                    let project_id = s.events.first().map(|e| e.project_id.as_str()).unwrap_or("unknown");
+                    
+                    tx.execute(
+                        "INSERT OR REPLACE INTO sessions (id, project_id, start_time, end_time, event_count) 
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        rusqlite::params![
+                            s.id.to_string(),
+                            project_id,
+                            s.start_time.to_rfc3339(),
+                            s.end_time.to_rfc3339(),
+                            s.events.len() as i64,
+                        ],
+                    )?;
+
+                    for event in &s.events {
+                        tx.execute(
+                            "INSERT OR REPLACE INTO session_assignments (session_id, event_id, project_id, timestamp) 
+                             VALUES (?1, ?2, ?3, ?4)",
+                            rusqlite::params![
+                                s.id.to_string(),
+                                event.id.to_string(),
+                                project_id,
+                                event.timestamp.to_rfc3339(),
+                            ],
+                        )?;
+                    }
+
+                    println!("Session {}: {} ({} events) -> Persisted to DB", i, s.id, s.events.len());
                 }
+                
+                tx.commit()?;
             }
         },
         Commands::Replay { subcmd } => match subcmd {

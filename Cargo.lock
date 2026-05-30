@@ -175,6 +175,7 @@ dependencies = [
  "clap",
  "event-store",
  "replay-engine",
+ "rusqlite",
  "serde_json",
  "session-engine",
 ]
