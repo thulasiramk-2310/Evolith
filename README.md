@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="./assets/evolith-io-flow.svg" alt="Evolith banner" width="100%" />
+  <img src="./assets/evolith-terminal-demo.svg" alt="Animated Evolith terminal demo" width="100%" />
   <br/><br/>
 
   ![License](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge)
@@ -14,19 +14,13 @@
 
 Evolith is a local-first developer intelligence engine that turns raw activity into explainable feature history.
 
-## Animated Command Demo
-
-<div align="center">
-  <img src="./assets/evolith-terminal-demo.svg" alt="Animated Evolith terminal demo" width="980" />
-</div>
-
 ## Animated I/O Flow
 
 <div align="center">
   <img src="./assets/evolith-io-flow.svg" alt="Animated Evolith I/O flow" width="980" />
 </div>
 
-## What Evolith Does
+## At a Glance
 
 - Collects immutable development events (`git` today)
 - Reconstructs sessions and features from those events
@@ -34,7 +28,7 @@ Evolith is a local-first developer intelligence engine that turns raw activity i
 - Scores reconstruction trust with deterministic metrics
 - Explains every feature and every run in both text and JSON
 
-## How It Works
+## Workflow
 
 ```text
 Git History
@@ -46,7 +40,16 @@ Git History
   -> Explainability (feature + run)
 ```
 
-## CLI Workflow
+## Quick Start
+
+```bash
+git clone <repo-url>
+cd evolith
+cargo build
+cargo run --manifest-path crates/cli/Cargo.toml --bin evolith -- init
+```
+
+## Core Commands
 
 ```bash
 evolith init
@@ -58,7 +61,7 @@ evolith features list
 evolith features explain <feature-id>
 ```
 
-JSON output:
+JSON mode:
 
 ```bash
 evolith runs show 0 --json
@@ -87,8 +90,6 @@ Evolith separates consistency from evidence volume:
 
 ## Alpha Scope (`v0.1.0-alpha`)
 
-Included:
-
 - Git collection
 - Feature reconstruction pipeline
 - Run tracking and metrics
@@ -102,6 +103,8 @@ Known limitations:
 - Multi-project monorepo boundaries are not first-class yet
 
 ## Repository Layout
+<details>
+<summary>Show project structure</summary>
 
 ```text
 crates/
@@ -118,17 +121,7 @@ research/
   reports/
 samples/
 ```
-
-## Getting Started
-
-```bash
-git clone <repo-url>
-cd evolith
-cargo build
-cargo run --manifest-path crates/cli/Cargo.toml --bin evolith -- init
-```
-
-Then run the workflow above on a repository you know well.
+</details>
 
 ## Contributing
 
