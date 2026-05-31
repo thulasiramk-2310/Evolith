@@ -10,7 +10,14 @@ import itertools
 from collections import defaultdict
 
 from synthetic_data import generate_synthetic_events
-from feature_reconstruction_simulator import calculate_similarity, evaluate_clusters
+from feature_reconstruction_simulator import (
+    assign_episode_ids,
+    calculate_similarity,
+    calculate_similarity_hybrid,
+    calculate_similarity_weighted,
+    compute_file_idf,
+    evaluate_clusters,
+)
 
 def build_baseline_clusters(events, threshold=0.39):
     parent = {e['event_id']: e['event_id'] for e in events}
@@ -57,15 +64,41 @@ def build_dbscan_clusters(events, eps=0.6, min_samples=3):
             
     return sorted(list(clusters.values()), key=len, reverse=True)
 
-def build_louvain_clusters(events, threshold=0.1):
+def build_louvain_clusters(
+    events,
+    threshold=0.1,
+    use_file_rarity_weighting=True,
+    use_episode_continuity=True,
+    use_hub_penalty=True,
+):
     G = nx.Graph()
     for e in events:
         G.add_node(e['event_id'], data=e)
-        
+
+    idf_map, min_idf, max_idf = compute_file_idf(events)
+    episode_map = assign_episode_ids(events) if use_episode_continuity else None
+
+    pending_edges = []
     for e1, e2 in itertools.combinations(events, 2):
-        sim = calculate_similarity(e1, e2)
+        if use_file_rarity_weighting and use_episode_continuity:
+            sim = calculate_similarity_hybrid(
+                e1, e2, idf_map, min_idf, max_idf, episode_map=episode_map
+            )
+        elif use_file_rarity_weighting:
+            sim = calculate_similarity_weighted(e1, e2, idf_map, min_idf, max_idf)
+        else:
+            sim = calculate_similarity(e1, e2)
         if sim > threshold:
-            G.add_edge(e1['event_id'], e2['event_id'], weight=sim)
+            pending_edges.append((e1['event_id'], e2['event_id'], sim))
+
+    for u, v, w in pending_edges:
+        G.add_edge(u, v, weight=w)
+
+    if use_hub_penalty and G.number_of_edges() > 0:
+        for u, v, data in G.edges(data=True):
+            deg_u = max(1, G.degree(u))
+            deg_v = max(1, G.degree(v))
+            data["weight"] = data["weight"] / np.sqrt(deg_u * deg_v)
             
     # Louvain
     communities = louvain_communities(G, weight='weight')
