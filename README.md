@@ -1,225 +1,143 @@
 <div align="center">
+  <img src="./assets/evolith-io-flow.svg" alt="Evolith banner" width="100%" />
+  <br/><br/>
 
-<img src="./DevReplay-banner.svg" alt="DevReplay banner" width="100%" />
-
-<br><br>
-
-![MIT License](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge)
-![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)
-![Local First](https://img.shields.io/badge/Local--First-0f172a?style=for-the-badge)
-![Open Source](https://img.shields.io/badge/Open%20Source-111827?style=for-the-badge&logo=github&logoColor=white)
-
+  ![License](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge)
+  ![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)
+  ![Stage](https://img.shields.io/badge/Stage-v0.1.0--alpha-0f172a?style=for-the-badge)
+  ![Local First](https://img.shields.io/badge/Local--First-111827?style=for-the-badge)
 </div>
 
-# DevReplay
+# Evolith
 
-> **Git tells you what changed. DevReplay tells you how it happened.**
+> Git tells you what changed. Evolith reconstructs, explains, and evaluates how it happened.
 
-DevReplay is an open-source **feature reconstruction engine** for developer activity. It records immutable development events, reconstructs sessions and features from those events, and replays the story of how software was built.
+Evolith is a local-first developer intelligence engine that turns raw activity into explainable feature history.
 
----
+## Animated Command Demo
 
-## Why DevReplay exists
+<div align="center">
+  <img src="./assets/evolith-terminal-demo.svg" alt="Animated Evolith terminal demo" width="980" />
+</div>
 
-Modern development lives across Git, the terminal, the editor, tests, and local tooling. Git tells you the final diffs, but it does not preserve the reasoning trail that led there.
+## Animated I/O Flow
 
-DevReplay is built around one idea:
+<div align="center">
+  <img src="./assets/evolith-io-flow.svg" alt="Animated Evolith I/O flow" width="980" />
+</div>
 
-- **Events** are facts
-- **Sessions** are projections
-- **Features** are projections
-- **Stories** are projections
+## What Evolith Does
 
-That separation matters because it keeps the raw truth intact while allowing the project history to be reconstructed later.
+- Collects immutable development events (`git` today)
+- Reconstructs sessions and features from those events
+- Persists assignments and run history in SQLite
+- Scores reconstruction trust with deterministic metrics
+- Explains every feature and every run in both text and JSON
 
----
-
-## Core model
-
-```mermaid
-flowchart TD
-    A[Developer action] --> B[Event]
-    B --> C[Session]
-    C --> D[Feature]
-    D --> E[Story]
-    E --> F[Project memory]
-```
-
-### The hierarchy
-
-- **Event** — an immutable fact about a developer action
-- **Session** — a contiguous period of activity derived from events
-- **Feature** — a grouped slice of work reconstructed from sessions and events
-- **Story** — a readable explanation generated from the feature history
-- **Project** — the aggregate memory of the codebase
-
----
-
-## How it feels in practice
-
-```mermaid
-sequenceDiagram
-    participant Dev as Developer
-    participant C as Collector
-    participant S as SQLite Event Store
-    participant X as Session Engine
-    participant F as Feature Engine
-    participant R as Replay UI
-
-    Dev->>C: Save file / run test / commit
-    C->>S: Append immutable event
-    S->>X: Read event stream
-    X->>F: Group activity into sessions
-    F->>R: Reconstruct feature timeline
-    R-->>Dev: Replay how the work happened
-```
-
----
-
-## Current vision
-
-The project is designed to grow in layers:
-
-### Milestone 0
-- Event storage
-- Session reconstruction
-- CLI replay
-
-### Next layers
-- Feature reconstruction
-- Multi-assignment history
-- Story generation
-- Team mode
-- Desktop UI
-
----
-
-## What makes it different
-
-DevReplay is not trying to be another Git GUI or another dashboard.
-
-It is trying to answer different questions:
-
-- Why was Redis added?
-- What changed before the test suite broke?
-- Which files belonged to the authentication rewrite?
-- How did this feature evolve over time?
-- What happened between the commit and the bug?
-
-That is why the project is built on event sourcing first.
-
----
-
-## Architecture
-
-```mermaid
-graph LR
-    A[Collectors] --> B[Event Store]
-    B --> C[Session Engine]
-    B --> D[Feature Engine]
-    C --> E[Replay Engine]
-    D --> E
-    E --> F[CLI]
-    E --> G[Desktop UI later]
-```
-
-### Repository layout
+## How It Works
 
 ```text
-devreplay/
-├── docs/
-│   ├── adr/
-│   └── rfcs/
-├── crates/
-│   ├── event-store/
-│   ├── session-engine/
-│   ├── replay-engine/
-│   └── cli/
-├── samples/
-└── LICENSE
+Git History
+  -> Event Collection
+  -> Anchor Extraction (ticket/branch/PR/pattern)
+  -> Episode Reconstruction
+  -> Feature Reconstruction
+  -> Metrics + Health
+  -> Explainability (feature + run)
 ```
 
----
+## CLI Workflow
 
-## Tech stack
+```bash
+evolith init
+evolith collect git
+evolith features rebuild
+evolith runs list
+evolith runs show 0
+evolith features list
+evolith features explain <feature-id>
+```
 
-- **Rust** for the core engine
-- **SQLite** for local-first storage
-- **Serde** for structured event data
-- **Clap** for the CLI
-- **Tauri + React** later for the desktop client
+JSON output:
 
-Rust is a strong fit because DevReplay is a local, long-running systems tool that needs safe concurrency, fast queries, and small binaries.
+```bash
+evolith runs show 0 --json
+evolith features explain <feature-id> --json
+```
 
----
+Compatibility note: `devreplay` is still available as a deprecated alpha alias.
 
-## Development philosophy
+## Why Teams Use It
 
-DevReplay follows a strict rule:
+Evolith is built for questions Git cannot answer directly:
 
-> **Never store a derived truth as if it were raw truth.**
+- What were the real work streams behind the last month of commits?
+- Which reconstructed features are trustworthy vs weakly supported?
+- How much of repository history is anchor-driven vs heuristic fallback?
+- Where is reconstruction fragmentation happening?
 
-That means:
+## Trust Model
 
-- Events stay immutable
-- Sessions can be rebuilt
-- Features can be re-clustered
-- Stories can be regenerated
-- The underlying history remains auditable
+Evolith separates consistency from evidence volume:
 
-This makes the project easier to improve over time without losing the original data.
+- `Anchor Confidence`: internal anchor agreement
+- `Evidence Strength`: amount of supporting activity
+- `Feature Health`: healthy / weak / fragmented / conflicting signals
+- `Run Health`: quality summary at full reconstruction-run level
 
----
+## Alpha Scope (`v0.1.0-alpha`)
 
-## Status
+Included:
 
-This repository is currently focused on the foundation.
+- Git collection
+- Feature reconstruction pipeline
+- Run tracking and metrics
+- Explainability and trust outputs
+- Real repository validation artifacts
 
-### Implemented direction
-- Event model
-- Event sourcing architecture
-- Session projection concept
-- Replay-first workflow
+Known limitations:
 
-### Coming next
-- Session persistence
-- Feature reconstruction
-- Assignment history
-- Better replay views
+- Git is currently the only collected signal source
+- Sparse histories with low anchor density can fragment
+- Multi-project monorepo boundaries are not first-class yet
 
----
+## Repository Layout
 
-## Getting started
+```text
+crates/
+  cli/
+  event-store/
+  session-engine/
+  replay-engine/
+docs/
+  adr/
+  rfcs/
+  research/
+research/
+  adversarial/
+  reports/
+samples/
+```
+
+## Getting Started
 
 ```bash
 git clone <repo-url>
-cd devreplay
+cd evolith
 cargo build
+cargo run --manifest-path crates/cli/Cargo.toml --bin evolith -- init
 ```
 
-Then:
-
-```bash
-devreplay init
-devreplay import samples/sample-events.json
-devreplay events list
-devreplay sessions rebuild
-devreplay replay session <id>
-```
-
----
+Then run the workflow above on a repository you know well.
 
 ## Contributing
 
-Read these first:
+Start here:
 
 - `docs/adr/ADR-001-why-event-sourcing.md`
 - `docs/rfcs/RFC-001-event-model.md`
-
-If you are contributing code, start with the core crates before adding collectors or UI.
-
----
+- `CONTRIBUTING.md`
 
 ## License
 
-MIT License.
+MIT

@@ -4,7 +4,7 @@
 Proposed
 
 ## Context
-Raw events tell us what happened at the keystroke or file level. Sessions cluster these events chronologically to give a contiguous slice of developer time. However, to achieve DevReplay's vision ("how software was built"), we need semantic grouping. We call this grouping "Features." Features allow a user to understand the goal-oriented lifecycle of a block of work rather than just reading a raw sequential diary.
+Raw events tell us what happened at the keystroke or file level. Sessions cluster these events chronologically to give a contiguous slice of developer time. However, to achieve Evolith's vision ("how software was built"), we need semantic grouping. We call this grouping "Features." Features allow a user to understand the goal-oriented lifecycle of a block of work rather than just reading a raw sequential diary.
 
 ## Definition of a Feature
 A "Feature" is an aggregated projection of multiple sessions (or slices of sessions) correlated by a common semantic goal. 
@@ -38,5 +38,6 @@ Maps underlying events (or sessions) into the semantic feature scope.
 - event_id (UUID, Foreign Key)
 
 ### 3. Engine Operations
-- econstruct_features(): Operates over unassigned sessions/events and performs contextual grouping logic.
+- 
+econstruct_features(): Operates over unassigned sessions/events and performs contextual grouping logic.
 - get_feature(id): Reads the projection back from persistent storage to replay solely the slices of changes that directly pertained to that feature.

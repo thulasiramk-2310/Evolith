@@ -4,7 +4,7 @@
 Proposed
 
 ## Context
-Raw events map to every minor developer action, resulting in thousands of unorganized data points. To make DevReplay useful, we need a higher-level grouping mechanism called "Sessions". A session represents a contiguous block of developer activity.
+Raw events map to every minor developer action, resulting in thousands of unorganized data points. To make Evolith useful, we need a higher-level grouping mechanism called "Sessions". A session represents a contiguous block of developer activity.
 
 ## Definition of a Session
 For Milestone 0, a Session is defined by time-proximity:

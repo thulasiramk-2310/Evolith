@@ -1,4 +1,4 @@
-# Contributing to DevReplay
+# Contributing to Evolith
 
 Read ADR-001 before contributing.
 Read RFC-001 before implementing collectors.
@@ -16,15 +16,15 @@ Avoid adding new product surfaces unless directly required for alpha stability.
 ## Development Workflow
 
 1. Initialize local workspace:
-   - `cargo run --manifest-path crates/cli/Cargo.toml -- init`
+   - `cargo run --manifest-path crates/cli/Cargo.toml --bin evolith -- init`
 2. Collect and rebuild:
-   - `cargo run --manifest-path crates/cli/Cargo.toml -- collect git`
-   - `cargo run --manifest-path crates/cli/Cargo.toml -- features rebuild`
+   - `cargo run --manifest-path crates/cli/Cargo.toml --bin evolith -- collect git`
+   - `cargo run --manifest-path crates/cli/Cargo.toml --bin evolith -- features rebuild`
 3. Inspect run and feature outputs:
-   - `cargo run --manifest-path crates/cli/Cargo.toml -- runs list`
-   - `cargo run --manifest-path crates/cli/Cargo.toml -- runs show 0`
-   - `cargo run --manifest-path crates/cli/Cargo.toml -- features list`
-   - `cargo run --manifest-path crates/cli/Cargo.toml -- features explain <feature-id>`
+   - `cargo run --manifest-path crates/cli/Cargo.toml --bin evolith -- runs list`
+   - `cargo run --manifest-path crates/cli/Cargo.toml --bin evolith -- runs show 0`
+   - `cargo run --manifest-path crates/cli/Cargo.toml --bin evolith -- features list`
+   - `cargo run --manifest-path crates/cli/Cargo.toml --bin evolith -- features explain <feature-id>`
 
 ## Quality Gates
 

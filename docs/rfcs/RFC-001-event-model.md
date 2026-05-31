@@ -4,7 +4,7 @@
 Accepted
 
 ## Context
-DevReplay needs a structured format to capture all development activity in a standardized way. These events are immutable records of state changes over time. They form the foundation of our event-sourced architecture (ADR-001).
+Evolith needs a structured format to capture all development activity in a standardized way. These events are immutable records of state changes over time. They form the foundation of our event-sourced architecture (ADR-001).
 
 ## Event Schema
 

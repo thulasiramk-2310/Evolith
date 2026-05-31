@@ -15,7 +15,7 @@ May 31, 2026
 ---
 
 ## Abstract
-DevReplay aggregates immutable developer events to project "how software is built." While Sessions (RFC-002) chunk this activity chronologically, they lack semantic context. This document proposes the design for a Feature Reconstruction Engine: an asynchronous, retrospective mechanism for grouping events and sessions into cross-cutting, semantic "Features." Features represent the overarching goal of a body of work. This RFC establishes the models for append-only, versioned feature assignments, gracefully supporting algorithmic heuristics, multiple event-to-feature overlaps, and manual corrections over immutable events.
+Evolith aggregates immutable developer events to project "how software is built." While Sessions (RFC-002) chunk this activity chronologically, they lack semantic context. This document proposes the design for a Feature Reconstruction Engine: an asynchronous, retrospective mechanism for grouping events and sessions into cross-cutting, semantic "Features." Features represent the overarching goal of a body of work. This RFC establishes the models for append-only, versioned feature assignments, gracefully supporting algorithmic heuristics, multiple event-to-feature overlaps, and manual corrections over immutable events.
 
 ## Context
 Following **ADR-001**, events are the immutable source of truth. Raw events capture isolated steps (e.g., file edits, git commits). Sessions represent chronological proximity ("developer sat down for 3 hours"). However, these views are inadequate for understanding the structural and goal-oriented lifecycle of a codebase.
@@ -30,7 +30,7 @@ A single 4-hour session might involve work on "OAuth2" (Feature A) alongside a q
 Context is rarely pristine at the moment of typing. Realizing that a specific change belonged to a wider feature may only become algebraically clear later—once a branch completes, a commit message is written, or an issue is closed. Determining feature assignment is intrinsically a heuristic projection applied retrospectively, not a concrete recording.
 
 ## Goals
-- Formally define semantic Features within DevReplay.
+- Formally define semantic Features within Evolith.
 - Introduce a robust schema to project events onto Features without mutating original event data.
 - Manage conflict resolution and overlapping assignments when an event contributes to multiple features.
 - Permit versioned algorithmic updates where improved heuristics can supersede older feature groupings.
@@ -38,7 +38,7 @@ Context is rarely pristine at the moment of typing. Realizing that a specific ch
 
 ## Non-Goals
 - Real-time prediction of the active feature during event ingestion.
-- Modifying the primary event payloads or storing source code contents natively in DevReplay to determine context.
+- Modifying the primary event payloads or storing source code contents natively in Evolith to determine context.
 - Hardcoding explicit AST or language parsing directly within this design document.
 - Implementing the engine logic code in this phase.
 
@@ -84,11 +84,11 @@ Maps events to features using an append-only, versioned strategy.
 - `superseded_by` MUST default to `NULL`. An active, undisputed projection is one where `superseded_by IS NULL`. 
 
 ### Why Versioning in Assignments is Needed
-As algorithmic heuristics improve over successive DevReplay engine releases, the clustering shape of prior events may shift. We cannot destructively modify historical graphs. Versioned `algorithm_version` tags and `superseded_by` pointers maintain analytical integrity.
+As algorithmic heuristics improve over successive Evolith engine releases, the clustering shape of prior events may shift. We cannot destructively modify historical graphs. Versioned `algorithm_version` tags and `superseded_by` pointers maintain analytical integrity.
 
 ## Conflict Resolution
 When an event probabilistically matches multiple features (e.g., a shared `utils.ts` export modified in a session supporting two parallel branch features):
-- **Primary Owner Selection:** DevReplay determines the primary feature for a specific event by choosing the active (`superseded_by IS NULL`) assignment record with the highest `confidence_score`.
+- **Primary Owner Selection:** Evolith determines the primary feature for a specific event by choosing the active (`superseded_by IS NULL`) assignment record with the highest `confidence_score`.
 - **Secondary Preservation:** Lower confidence assignments to the same event are NOT deleted. They remain attached so users can pivot to the "overlapping feature context" from the UI.
 - **Developer Ground Truth:** Manual correction supersedes all algorithmic assignments. If an Algorithm v1 assigns an event to Feature A, and a developer moves the event to Feature B, Feature B wins. The system stores the old assignment as superseded. It never argues with the user.
 

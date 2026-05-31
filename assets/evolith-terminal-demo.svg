@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1100" height="520" viewBox="0 0 1100 520" role="img" aria-label="Animated Evolith terminal demo">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1020"/>
+      <stop offset="100%" stop-color="#111827"/>
+    </linearGradient>
+    <style>
+      .title { font: 700 22px 'Consolas', 'Menlo', monospace; fill: #e5e7eb; }
+      .sub { font: 400 13px 'Consolas', 'Menlo', monospace; fill: #9ca3af; }
+      .term { font: 500 18px 'Consolas', 'Menlo', monospace; }
+      .prompt { fill: #22c55e; }
+      .cmd { fill: #e5e7eb; }
+      .out { fill: #93c5fd; }
+      .ok { fill: #34d399; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1100" height="520" rx="18" fill="url(#bg)"/>
+  <text x="28" y="42" class="title">Evolith CLI Demo (animated)</text>
+  <text x="28" y="66" class="sub">This simulates what you see when running core commands.</text>
+
+  <rect x="24" y="88" width="1052" height="404" rx="12" fill="#05070f" stroke="#1f2937"/>
+  <circle cx="48" cy="108" r="6" fill="#ef4444"/>
+  <circle cx="68" cy="108" r="6" fill="#f59e0b"/>
+  <circle cx="88" cy="108" r="6" fill="#22c55e"/>
+  <text x="110" y="113" class="sub">terminal</text>
+
+  <!-- Frame 1 -->
+  <g id="f1">
+    <text x="46" y="154" class="term prompt">$</text>
+    <text x="70" y="154" class="term cmd">evolith init</text>
+    <text x="46" y="186" class="term ok">Initialized Evolith in .evolith</text>
+  </g>
+
+  <!-- Frame 2 -->
+  <g id="f2" visibility="hidden">
+    <set attributeName="visibility" to="visible" begin="2.2s" dur="2.8s"/>
+    <set attributeName="visibility" to="hidden" begin="5s"/>
+    <text x="46" y="154" class="term prompt">$</text>
+    <text x="70" y="154" class="term cmd">evolith collect git</text>
+    <text x="46" y="186" class="term out">Collected 64 git commit events.</text>
+  </g>
+
+  <!-- Frame 3 -->
+  <g id="f3" visibility="hidden">
+    <set attributeName="visibility" to="visible" begin="5s" dur="3s"/>
+    <set attributeName="visibility" to="hidden" begin="8s"/>
+    <text x="46" y="154" class="term prompt">$</text>
+    <text x="70" y="154" class="term cmd">evolith features rebuild</text>
+    <text x="46" y="186" class="term out">Rebuilt 21 features using v0.1-anchor-hybrid.</text>
+  </g>
+
+  <!-- Frame 4 -->
+  <g id="f4" visibility="hidden">
+    <set attributeName="visibility" to="visible" begin="8s" dur="4.5s"/>
+    <set attributeName="visibility" to="hidden" begin="12.5s"/>
+    <text x="46" y="154" class="term prompt">$</text>
+    <text x="70" y="154" class="term cmd">evolith runs show 0</text>
+    <text x="46" y="186" class="term out">Run #14  status=completed</text>
+    <text x="46" y="214" class="term out">Features: 21   Anchor Coverage: 39.1%</text>
+    <text x="46" y="242" class="term out">Anchored: 14   Unanchored: 7</text>
+    <text x="46" y="270" class="term out">Dominant Anchor Ratio: 0.67</text>
+    <text x="46" y="298" class="term ok">Health: Good</text>
+  </g>
+
+  <!-- Frame 5 -->
+  <g id="f5" visibility="hidden">
+    <set attributeName="visibility" to="visible" begin="12.5s" dur="4.5s"/>
+    <set attributeName="visibility" to="hidden" begin="17s"/>
+    <text x="46" y="154" class="term prompt">$</text>
+    <text x="70" y="154" class="term cmd">evolith features explain &lt;id&gt;</text>
+    <text x="46" y="186" class="term out">Feature: Pattern interview</text>
+    <text x="46" y="214" class="term out">Anchor Confidence: 0.89</text>
+    <text x="46" y="242" class="term out">Evidence Strength: Strong (0.91)</text>
+    <text x="46" y="270" class="term out">Feature Health: Healthy</text>
+    <text x="46" y="298" class="term ok">Why grouped: strong anchor agreement.</text>
+  </g>
+
+  <!-- Frame 6 -->
+  <g id="f6" visibility="hidden">
+    <set attributeName="visibility" to="visible" begin="17s" dur="5s"/>
+    <set attributeName="visibility" to="hidden" begin="22s"/>
+    <text x="46" y="154" class="term prompt">$</text>
+    <text x="70" y="154" class="term cmd">evolith runs show 0 --json</text>
+    <text x="46" y="186" class="term out">{</text>
+    <text x="70" y="214" class="term out">"status": "completed",</text>
+    <text x="70" y="242" class="term out">"feature_count": 21,</text>
+    <text x="70" y="270" class="term out">"anchor_coverage": 0.391,</text>
+    <text x="70" y="298" class="term out">"health": "Good"</text>
+    <text x="46" y="326" class="term out">}</text>
+  </g>
+
+  <!-- Loop reset -->
+  <set xlink:href="#f1" attributeName="visibility" to="hidden" begin="2.2s"/>
+  <set xlink:href="#f1" attributeName="visibility" to="visible" begin="22s"/>
+
+  <text x="28" y="506" class="sub">Loop duration: 22s</text>
+</svg>

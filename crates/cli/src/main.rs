@@ -7,6 +7,7 @@ use serde::Serialize;
 use session_engine::SessionEngine;
 use replay_engine::ReplayEngine;
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -78,18 +79,34 @@ enum FeatureCommands {
 const FEATURE_ALGO_VERSION: &str = "v0.1-anchor-hybrid";
 
 fn get_db_path() -> PathBuf {
-    Path::new(".devreplay").join("events.db")
+    let preferred = Path::new(".evolith");
+    let legacy = Path::new(".devreplay");
+    if preferred.exists() || !legacy.exists() {
+        return preferred.join("events.db");
+    }
+    legacy.join("events.db")
 }
 
 fn main() -> Result<()> {
+    if let Some(invoked_as) = env::args().next() {
+        let invoked_name = Path::new(&invoked_as)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        if invoked_name == "devreplay" {
+            eprintln!("Warning: `devreplay` is deprecated; use `evolith`.");
+        }
+    }
+
     let cli = Cli::parse();
 
     match &cli.command {
         Commands::Init => {
-            fs::create_dir_all(".devreplay")?;
+            fs::create_dir_all(".evolith")?;
             let db_path = get_db_path();
             let _store = EventStore::new(&db_path)?;
-            println!("Initialized DevReplay in .devreplay");
+            println!("Initialized Evolith in {}", db_path.parent().and_then(|p| p.to_str()).unwrap_or(".evolith"));
         }
         Commands::Collect { subcmd } => match subcmd {
             CollectCommands::Git => {
@@ -413,7 +430,7 @@ fn main() -> Result<()> {
                 let store = EventStore::new(&db_path)?;
                 let features = store.list_features()?;
                 if features.is_empty() {
-                    println!("No features found. Run `devreplay features rebuild` first.");
+                    println!("No features found. Run `evolith features rebuild` first.");
                 } else {
                     for (i, feature) in features.iter().enumerate() {
                         println!(

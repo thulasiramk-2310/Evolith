@@ -43,7 +43,7 @@ Date: May 30, 2026
 
 ## Cross-Repository Comparison
 
-| Metric | DevReplay | Bravely (M2.2) | TRX-AI Candidate |
+| Metric | Evolith | Bravely (M2.2) | TRX-AI Candidate |
 | --- | ---: | ---: | ---: |
 | Commits | 11 | 64 | 57 |
 | Features | 8 | 21 | 9 |
