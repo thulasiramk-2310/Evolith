@@ -1,0 +1,9 @@
+# Normalize line endings
+* text=auto
+
+# Force LF for source and docs
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.py text eol=lf

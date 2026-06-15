@@ -36,6 +36,16 @@ pub struct EventStore {
     pub conn: Connection,
 }
 
+#[derive(Debug, Clone)]
+pub struct FeatureRunMetrics {
+    pub feature_count: i64,
+    pub anchor_coverage: f64,
+    pub anchored_feature_count: i64,
+    pub unanchored_feature_count: i64,
+    pub avg_events_per_feature: f64,
+    pub dominant_anchor_ratio: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Feature {
     pub id: Uuid,
@@ -491,16 +501,7 @@ impl EventStore {
         Ok(())
     }
 
-    pub fn complete_feature_run(
-        &self,
-        run_id: Uuid,
-        feature_count: i64,
-        anchor_coverage: f64,
-        anchored_feature_count: i64,
-        unanchored_feature_count: i64,
-        avg_events_per_feature: f64,
-        dominant_anchor_ratio: f64,
-    ) -> Result<()> {
+    pub fn complete_feature_run(&self, run_id: Uuid, metrics: FeatureRunMetrics) -> Result<()> {
         self.conn.execute(
             "UPDATE feature_runs
              SET status = 'completed',
@@ -514,12 +515,12 @@ impl EventStore {
              WHERE id = ?8",
             params![
                 Utc::now().to_rfc3339(),
-                feature_count,
-                anchor_coverage,
-                anchored_feature_count,
-                unanchored_feature_count,
-                avg_events_per_feature,
-                dominant_anchor_ratio,
+                metrics.feature_count,
+                metrics.anchor_coverage,
+                metrics.anchored_feature_count,
+                metrics.unanchored_feature_count,
+                metrics.avg_events_per_feature,
+                metrics.dominant_anchor_ratio,
                 run_id.to_string()
             ],
         )?;
@@ -569,6 +570,41 @@ impl EventStore {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    pub fn get_latest_completed_run(&self) -> Result<Option<FeatureRun>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, status, algorithm_version, started_at, completed_at, event_count, feature_count,
+                    anchor_coverage, anchored_feature_count, unanchored_feature_count, avg_events_per_feature, dominant_anchor_ratio
+             FROM feature_runs
+             WHERE status = 'completed'
+             ORDER BY completed_at DESC
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query([])?;
+        if let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let started_at: String = row.get(3)?;
+            let completed_at: Option<String> = row.get(4)?;
+            return Ok(Some(FeatureRun {
+                id: Uuid::parse_str(&id).unwrap_or_default(),
+                status: row.get(1)?,
+                algorithm_version: row.get(2)?,
+                started_at: DateTime::parse_from_rfc3339(&started_at)
+                    .map(|v| v.with_timezone(&Utc))
+                    .unwrap_or_default(),
+                completed_at: completed_at
+                    .and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|v| v.with_timezone(&Utc))),
+                event_count: row.get(5)?,
+                feature_count: row.get(6)?,
+                anchor_coverage: row.get(7)?,
+                anchored_feature_count: row.get(8)?,
+                unanchored_feature_count: row.get(9)?,
+                avg_events_per_feature: row.get(10)?,
+                dominant_anchor_ratio: row.get(11)?,
+            }));
+        }
+        Ok(None)
     }
 
     pub fn get_feature_run_by_id(&self, run_id: &str) -> Result<Option<FeatureRun>> {

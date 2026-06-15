@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
-use event_store::{Event, EventStore, EventType, Feature, FeatureAssignment};
+use event_store::{Event, EventStore, EventType, Feature, FeatureAssignment, FeatureRunMetrics};
 use regex::Regex;
 use serde::Serialize;
 use session_engine::SessionEngine;
@@ -31,6 +31,14 @@ enum Commands {
     Features { #[command(subcommand)] subcmd: FeatureCommands },
     Replay {
         #[command(subcommand)] subcmd: ReplayCommands,
+    },
+    /// Assess repository health and get actionable recommendations
+    Doctor {
+        #[arg(long)]
+        json: bool,
+        /// Show a focused security-only report (no feature run required)
+        #[arg(long)]
+        security: bool,
     },
 }
 
@@ -77,6 +85,19 @@ enum FeatureCommands {
 }
 
 const FEATURE_ALGO_VERSION: &str = "v0.1-anchor-hybrid";
+
+// Doctor command thresholds — keep in one place for easy tuning (RFC-006)
+const DOCTOR_RULESET_VERSION: &str = "v0.1";
+const DOCTOR_ANCHOR_COV_GOOD: f64 = 0.40;
+const DOCTOR_ANCHOR_COV_LOW: f64 = 0.20;
+const DOCTOR_ANCHOR_COV_WARN: f64 = 0.30;
+const DOCTOR_DOM_RATIO_GOOD: f64 = 0.70;
+const DOCTOR_DOM_RATIO_POOR: f64 = 0.50;
+const DOCTOR_DOM_RATIO_WARN: f64 = 0.60;
+const DOCTOR_FRAG_THRESHOLD: f64 = 2.0;
+const DOCTOR_OVER_MERGE_THRESHOLD: f64 = 25.0;
+const DOCTOR_WEAK_RATE_POOR: f64 = 0.40;
+const DOCTOR_WEAK_RATE_WARN: f64 = 0.30;
 
 fn get_db_path() -> PathBuf {
     let preferred = Path::new(".evolith");
@@ -203,12 +224,10 @@ fn main() -> Result<()> {
                     for line in observations {
                         println!("- {}", line);
                     }
+                } else if *json {
+                    println!("{}", serde_json::json!({"error":"feature run not found"}));
                 } else {
-                    if *json {
-                        println!("{}", serde_json::json!({"error":"feature run not found"}));
-                    } else {
-                        println!("Feature run not found.");
-                    }
+                    println!("Feature run not found.");
                 }
             }
         },
@@ -403,15 +422,14 @@ fn main() -> Result<()> {
                         0.0
                     };
 
-                    store.complete_feature_run(
-                        run_id,
+                    store.complete_feature_run(run_id, FeatureRunMetrics {
                         feature_count,
                         anchor_coverage,
                         anchored_feature_count,
                         unanchored_feature_count,
                         avg_events_per_feature,
                         dominant_anchor_ratio,
-                    )?;
+                    })?;
                     Ok(feature_count)
                 })();
 
@@ -501,15 +519,47 @@ fn main() -> Result<()> {
                         feature_health,
                     );
                     println!("{explanation}");
+                } else if *json {
+                    println!("{}", serde_json::json!({"error":"feature not found"}));
                 } else {
-                    if *json {
-                        println!("{}", serde_json::json!({"error":"feature not found"}));
-                    } else {
-                        println!("Feature not found.");
-                    }
+                    println!("Feature not found.");
                 }
             }
         },
+        Commands::Doctor { json, security } => {
+            if *security {
+                // Security-only mode — no feature run required
+                let sec = scan_security();
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&sec)?);
+                } else {
+                    print!("{}", render_security_text(&sec));
+                }
+                return Ok(());
+            }
+            let db_path = get_db_path();
+            let store = EventStore::new(&db_path)?;
+            let run = match store.get_latest_completed_run()? {
+                Some(r) => r,
+                None => {
+                    if *json {
+                        println!("{}", serde_json::json!({"error": "no completed feature run found; run `evolith features rebuild` first"}));
+                    } else {
+                        println!("No completed feature run found.");
+                        println!("Run `evolith features rebuild` first.");
+                    }
+                    return Ok(());
+                }
+            };
+            let features = store.list_features()?;
+            let security_report = scan_security();
+            let report = build_doctor_report(&run, &features, security_report);
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", render_doctor_text(&report));
+            }
+        }
     }
 
     Ok(())
@@ -574,7 +624,7 @@ fn normalize_branch_anchor(branch: &str) -> Option<String> {
         "auth", "authentication", "login", "jwt", "session", "payment", "billing", "invoice",
         "cache", "search", "backend", "frontend", "api", "db", "database", "interview",
     ] {
-        if tokens.iter().any(|t| *t == strong) {
+        if tokens.contains(&strong) {
             return Some(strong.to_string());
         }
     }
@@ -839,6 +889,68 @@ impl RunExplainReport {
             observations,
         }
     }
+}
+
+#[derive(Serialize)]
+struct DoctorRecommendation {
+    id: String,
+    priority: String,
+    message: String,
+    expected_impact: String,
+}
+
+#[derive(Serialize)]
+struct DoctorMetrics {
+    anchor_coverage: f64,
+    dominant_anchor_ratio: f64,
+    feature_count: i64,
+    anchored_feature_count: i64,
+    unanchored_feature_count: i64,
+    avg_events_per_feature: f64,
+    weak_evidence_feature_count: i64,
+    weak_evidence_rate: f64,
+}
+
+#[derive(Serialize)]
+struct DoctorScoring {
+    overall_score: f64,
+    band: String,
+}
+
+#[derive(Serialize, Clone)]
+struct SecurityFinding {
+    severity: String,
+    kind: String,
+    message: String,
+    location: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SecurityReport {
+    risk_level: String,
+    findings: Vec<SecurityFinding>,
+    recommendations: Vec<String>,
+    scanned_file_count: usize,
+}
+
+impl SecurityReport {
+    #[cfg(test)]
+    fn empty() -> Self {
+        Self { risk_level: "None".to_string(), findings: vec![], recommendations: vec![], scanned_file_count: 0 }
+    }
+}
+
+#[derive(Serialize)]
+struct DoctorReport {
+    run_id: String,
+    ruleset_version: String,
+    status: String,
+    repository_health: String,
+    security: SecurityReport,
+    metrics: DoctorMetrics,
+    issues: Vec<String>,
+    recommendations: Vec<DoctorRecommendation>,
+    scoring: DoctorScoring,
 }
 
 fn estimate_evidence_strength(feature: &Feature, events: &[Event]) -> EvidenceStrength {
@@ -1126,6 +1238,766 @@ fn build_run_observations(run: &event_store::FeatureRun) -> Vec<String> {
         notes.push("Feature consolidation is reasonable based on average events per feature.".to_string());
     }
     notes
+}
+
+fn count_weak_features(features: &[Feature]) -> i64 {
+    features
+        .iter()
+        .filter(|f| {
+            let commits = f
+                .evidence_json
+                .get("commit_count")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let episodes = f
+                .evidence_json
+                .get("episode_count")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(1);
+            commits + episodes <= 2
+        })
+        .count() as i64
+}
+
+fn score_anchor_coverage(cov: f64) -> f64 {
+    // Piecewise: Poor(<0.20)→0–0.30, Moderate(0.20–0.40)→0.30–0.70, Good(≥0.40)→0.70–1.0
+    if cov >= DOCTOR_ANCHOR_COV_GOOD {
+        0.70 + 0.30 * (cov - DOCTOR_ANCHOR_COV_GOOD) / (1.0 - DOCTOR_ANCHOR_COV_GOOD)
+    } else if cov >= DOCTOR_ANCHOR_COV_LOW {
+        0.30 + 0.40 * (cov - DOCTOR_ANCHOR_COV_LOW) / (DOCTOR_ANCHOR_COV_GOOD - DOCTOR_ANCHOR_COV_LOW)
+    } else {
+        0.30 * (cov / DOCTOR_ANCHOR_COV_LOW)
+    }
+}
+
+fn score_dominant_ratio(ratio: f64) -> f64 {
+    // Piecewise: Poor(<0.50)→0–0.30, Moderate(0.50–0.70)→0.30–0.70, Good(≥0.70)→0.70–1.0
+    if ratio >= DOCTOR_DOM_RATIO_GOOD {
+        0.70 + 0.30 * (ratio - DOCTOR_DOM_RATIO_GOOD) / (1.0 - DOCTOR_DOM_RATIO_GOOD)
+    } else if ratio >= DOCTOR_DOM_RATIO_POOR {
+        0.30 + 0.40 * (ratio - DOCTOR_DOM_RATIO_POOR) / (DOCTOR_DOM_RATIO_GOOD - DOCTOR_DOM_RATIO_POOR)
+    } else {
+        0.30 * (ratio / DOCTOR_DOM_RATIO_POOR)
+    }
+}
+
+fn score_fragmentation(avg: f64) -> f64 {
+    if (DOCTOR_FRAG_THRESHOLD..=DOCTOR_OVER_MERGE_THRESHOLD).contains(&avg) {
+        1.0
+    } else if avg < DOCTOR_FRAG_THRESHOLD {
+        (avg / DOCTOR_FRAG_THRESHOLD).max(0.0)
+    } else {
+        (1.0 - (avg - DOCTOR_OVER_MERGE_THRESHOLD) / DOCTOR_OVER_MERGE_THRESHOLD).max(0.0)
+    }
+}
+
+fn score_weak_evidence(rate: f64) -> f64 {
+    ((DOCTOR_WEAK_RATE_POOR - rate) / DOCTOR_WEAK_RATE_POOR).max(0.0)
+}
+
+fn compute_doctor_score(run: &event_store::FeatureRun, weak_rate: f64) -> f64 {
+    0.35 * score_anchor_coverage(run.anchor_coverage)
+        + 0.30 * score_dominant_ratio(run.dominant_anchor_ratio)
+        + 0.20 * score_fragmentation(run.avg_events_per_feature)
+        + 0.15 * score_weak_evidence(weak_rate)
+}
+
+fn classify_health_band(score: f64) -> &'static str {
+    if score >= 0.75 {
+        "Good"
+    } else if score >= 0.50 {
+        "Moderate"
+    } else {
+        "Poor"
+    }
+}
+
+fn build_doctor_recommendations(
+    run: &event_store::FeatureRun,
+    weak_rate: f64,
+) -> Vec<DoctorRecommendation> {
+    let mut recs: Vec<DoctorRecommendation> = Vec::new();
+
+    // Rule A: Low anchor coverage
+    if run.anchor_coverage < DOCTOR_ANCHOR_COV_LOW {
+        recs.push(DoctorRecommendation {
+            id: "low_anchor_coverage_commit_anchors".to_string(),
+            priority: "high".to_string(),
+            message: "Include ticket IDs in commit messages (e.g. AUTH-123, PROJ-42).".to_string(),
+            expected_impact: "Anchor Coverage +15-25%".to_string(),
+        });
+        recs.push(DoctorRecommendation {
+            id: "low_anchor_coverage_pr_refs".to_string(),
+            priority: "high".to_string(),
+            message: "Reference PR numbers in merge and commit messages (e.g. #123, PR-123).".to_string(),
+            expected_impact: "Anchor Coverage +15-25%".to_string(),
+        });
+    } else if run.anchor_coverage < DOCTOR_ANCHOR_COV_WARN {
+        recs.push(DoctorRecommendation {
+            id: "moderate_anchor_coverage_branch_naming".to_string(),
+            priority: "medium".to_string(),
+            message: "Use descriptive branch names tied to features or tickets.".to_string(),
+            expected_impact: "Anchor Coverage +8-15%".to_string(),
+        });
+        recs.push(DoctorRecommendation {
+            id: "moderate_anchor_coverage_ticket_refs".to_string(),
+            priority: "medium".to_string(),
+            message: "Include ticket references in commit messages consistently.".to_string(),
+            expected_impact: "Anchor Coverage +8-15%".to_string(),
+        });
+    }
+
+    // Rule B: Low dominant anchor ratio
+    if run.dominant_anchor_ratio < DOCTOR_DOM_RATIO_POOR {
+        recs.push(DoctorRecommendation {
+            id: "low_identity_consistency".to_string(),
+            priority: "high".to_string(),
+            message: "Avoid mixing unrelated changes on the same branch or commit.".to_string(),
+            expected_impact: "Identity Consistency +0.10-0.25".to_string(),
+        });
+    } else if run.dominant_anchor_ratio < DOCTOR_DOM_RATIO_WARN {
+        recs.push(DoctorRecommendation {
+            id: "moderate_identity_consistency".to_string(),
+            priority: "medium".to_string(),
+            message: "Use stable work-item references across commits in the same work stream.".to_string(),
+            expected_impact: "Identity Consistency +0.05-0.15".to_string(),
+        });
+    }
+
+    // Rule C: High weak-evidence rate
+    if weak_rate > DOCTOR_WEAK_RATE_WARN {
+        recs.push(DoctorRecommendation {
+            id: "high_weak_evidence".to_string(),
+            priority: "medium".to_string(),
+            message: "Prefer larger coherent commits over many single-file micro-commits.".to_string(),
+            expected_impact: "Fewer unidentified work streams".to_string(),
+        });
+    }
+
+    // Rule D: Fragmentation
+    if run.avg_events_per_feature < DOCTOR_FRAG_THRESHOLD {
+        recs.push(DoctorRecommendation {
+            id: "fragmentation".to_string(),
+            priority: "medium".to_string(),
+            message: "Reduce standalone micro-commits; group related changes and reference the work item.".to_string(),
+            expected_impact: "Larger, more coherent work stream groupings".to_string(),
+        });
+    }
+
+    // Rule E: Over-merge risk
+    if run.avg_events_per_feature > DOCTOR_OVER_MERGE_THRESHOLD {
+        recs.push(DoctorRecommendation {
+            id: "over_merge_risk".to_string(),
+            priority: "low".to_string(),
+            message: "Split broad branches by feature intent; use distinct ticket or PR anchors per stream.".to_string(),
+            expected_impact: "Clearer work stream boundaries".to_string(),
+        });
+    }
+
+    recs
+}
+
+fn build_doctor_issues(run: &event_store::FeatureRun, weak_count: i64) -> Vec<String> {
+    let mut issues: Vec<String> = Vec::new();
+    let uncovered_pct = (1.0 - run.anchor_coverage) * 100.0;
+    if uncovered_pct > 50.0 {
+        issues.push(format!("{:.1}% of commits lack identifiable anchors.", uncovered_pct));
+    }
+    if run.unanchored_feature_count > 0 {
+        issues.push(format!(
+            "{} of {} work streams are ambiguous.",
+            run.unanchored_feature_count, run.feature_count
+        ));
+    }
+    if weak_count > 0 {
+        issues.push(format!("{} work streams have very thin evidence.", weak_count));
+    }
+    if run.avg_events_per_feature < DOCTOR_FRAG_THRESHOLD {
+        issues.push("High fragmentation: most work streams have fewer than 2 commits.".to_string());
+    }
+    if run.avg_events_per_feature > DOCTOR_OVER_MERGE_THRESHOLD {
+        issues.push("Some work streams may contain too many unrelated commits.".to_string());
+    }
+    issues
+}
+
+fn build_doctor_report(run: &event_store::FeatureRun, features: &[Feature], security: SecurityReport) -> DoctorReport {
+    let weak_count = count_weak_features(features);
+    let weak_rate = if run.feature_count > 0 {
+        weak_count as f64 / run.feature_count as f64
+    } else {
+        0.0
+    };
+    let score = compute_doctor_score(run, weak_rate);
+    let band = classify_health_band(score);
+    let recommendations = build_doctor_recommendations(run, weak_rate);
+    let issues = build_doctor_issues(run, weak_count);
+
+    DoctorReport {
+        run_id: run.id.to_string(),
+        ruleset_version: DOCTOR_RULESET_VERSION.to_string(),
+        status: run.status.clone(),
+        repository_health: band.to_string(),
+        security,
+        metrics: DoctorMetrics {
+            anchor_coverage: run.anchor_coverage,
+            dominant_anchor_ratio: run.dominant_anchor_ratio,
+            feature_count: run.feature_count,
+            anchored_feature_count: run.anchored_feature_count,
+            unanchored_feature_count: run.unanchored_feature_count,
+            avg_events_per_feature: run.avg_events_per_feature,
+            weak_evidence_feature_count: weak_count,
+            weak_evidence_rate: weak_rate,
+        },
+        issues,
+        recommendations,
+        scoring: DoctorScoring {
+            overall_score: (score * 1000.0).round() / 1000.0,
+            band: band.to_string(),
+        },
+    }
+}
+
+fn render_doctor_text(report: &DoctorReport) -> String {
+    let mut out = String::new();
+    let security_leads = matches!(report.security.risk_level.as_str(), "Critical" | "High");
+
+    if security_leads {
+        // When there's a Critical/High security issue, lead with it — the user needs to see the
+        // most urgent signal before their brain files the repo as "Moderate" and moves on.
+        out.push_str("Security Alert\n");
+        out.push_str("==============\n\n");
+        for f in &report.security.findings {
+            out.push_str(&format!("{}  {}\n", severity_label(&f.severity), f.message));
+        }
+        out.push('\n');
+        out.push_str(&format!("Risk: {}\n\n", report.security.risk_level));
+
+        // Health and project context follow
+        out.push_str(&format!("Repository Health: {}\n\n", report.repository_health));
+        out.push_str(&format!(
+            "Your project contains {} commits grouped into {} work streams.\n",
+            report.metrics.feature_count * report.metrics.avg_events_per_feature as i64,
+            report.metrics.feature_count,
+        ));
+        if report.metrics.unanchored_feature_count > 0 {
+            out.push_str(&format!(
+                "{} work streams remain ambiguous due to weak commit signals.\n",
+                report.metrics.unanchored_feature_count
+            ));
+        }
+    } else {
+        // Standard order when security is clean or medium: summary → health → security note
+        out.push_str("Repository Summary\n\n");
+        out.push_str(&format!(
+            "Your project contains {} commits grouped into {} work streams.\n\n",
+            report.metrics.feature_count * report.metrics.avg_events_per_feature as i64,
+            report.metrics.feature_count,
+        ));
+        if report.metrics.unanchored_feature_count > 0 {
+            out.push_str(&format!(
+                "Most work streams are identifiable, but {} remain ambiguous because commit \
+                 history lacks strong references to tickets, PRs, or feature branches.\n\n",
+                report.metrics.unanchored_feature_count
+            ));
+        } else {
+            out.push_str("All work streams are clearly identified with strong commit signals.\n\n");
+        }
+
+        out.push_str(&format!("Repository Health: {}\n", report.repository_health));
+
+        out.push('\n');
+        out.push_str("Security & Safety\n\n");
+        if report.security.findings.is_empty() {
+            out.push_str("✓  No security issues detected.\n");
+        } else {
+            for f in &report.security.findings {
+                out.push_str(&format!("{}  {}\n", severity_label(&f.severity), f.message));
+            }
+            out.push('\n');
+            out.push_str(&format!("Risk: {}\n", report.security.risk_level));
+        }
+    }
+
+    // Combined Recommended Actions — same structure regardless of ordering
+    let all_recs_count = report.security.recommendations.len() + report.recommendations.len();
+    if all_recs_count > 0 {
+        out.push('\n');
+        out.push_str("Recommended Actions\n");
+        let mut idx = 1usize;
+        for rec in &report.security.recommendations {
+            out.push_str(&format!("{}. {}\n", idx, rec));
+            idx += 1;
+        }
+        for rec in &report.recommendations {
+            out.push_str(&format!("{}. {}\n", idx, rec.message));
+            idx += 1;
+        }
+
+        let has_anchor_rule = report.recommendations.iter().any(|r| r.id.contains("anchor_coverage"));
+        let has_frag_rule = report.recommendations.iter().any(|r| r.id == "fragmentation");
+        let has_identity_rule = report.recommendations.iter().any(|r| r.id.contains("identity_consistency"));
+        let has_security_recs = !report.security.recommendations.is_empty();
+        if has_security_recs || has_anchor_rule || has_identity_rule || has_frag_rule {
+            out.push('\n');
+            out.push_str("Expected Result\n");
+            if has_security_recs && has_anchor_rule {
+                out.push_str("Reduced credential exposure risk, fewer ambiguous work streams, and more accurate project history reconstruction.\n");
+            } else if has_security_recs {
+                out.push_str("Reduced risk of credential exposure and improved repository safety.\n");
+            } else if has_anchor_rule && has_identity_rule {
+                out.push_str("Fewer ambiguous work streams, more accurate project history reconstruction, and stronger feature identity signals.\n");
+            } else if has_anchor_rule {
+                out.push_str("Fewer ambiguous work streams and more accurate project history reconstruction.\n");
+            } else if has_frag_rule {
+                out.push_str("Larger, more coherent work streams with clearer boundaries.\n");
+            } else if has_identity_rule {
+                out.push_str("More consistent work stream identity and improved reconstruction accuracy.\n");
+            }
+        }
+    } else {
+        out.push('\n');
+        out.push_str("No workflow changes recommended. Your commit practices already support good reconstruction.\n");
+    }
+
+    // Details section
+    out.push('\n');
+    out.push_str("Details\n");
+    out.push_str("-------\n");
+    out.push_str(&format!(
+        "Anchor Coverage: {:.1}%\n",
+        report.metrics.anchor_coverage * 100.0
+    ));
+    out.push_str(&format!(
+        "Dominant Anchor Ratio: {:.2}\n",
+        report.metrics.dominant_anchor_ratio
+    ));
+    out.push_str(&format!(
+        "Anchored Work Streams: {}\n",
+        report.metrics.anchored_feature_count
+    ));
+    out.push_str(&format!(
+        "Unidentified Work Streams: {}\n",
+        report.metrics.unanchored_feature_count
+    ));
+    out.push_str(&format!(
+        "Avg Commits per Work Stream: {:.2}\n",
+        report.metrics.avg_events_per_feature
+    ));
+
+    let has_anchor_rule = report.recommendations.iter().any(|r| r.id.contains("anchor_coverage"));
+    let has_identity_rule = report.recommendations.iter().any(|r| r.id.contains("identity_consistency"));
+    if has_anchor_rule {
+        let range = if report.metrics.anchor_coverage < DOCTOR_ANCHOR_COV_LOW { "15-25%" } else { "8-15%" };
+        out.push_str(&format!("Expected Anchor Coverage Improvement: {}\n", range));
+    }
+    if has_identity_rule {
+        let range = if report.metrics.dominant_anchor_ratio < DOCTOR_DOM_RATIO_POOR { "0.10-0.25" } else { "0.05-0.15" };
+        out.push_str(&format!("Expected Identity Consistency Improvement: {}\n", range));
+    }
+
+    out
+}
+
+// ─── RFC-007: Security & Safety ────────────────────────────────────────────
+
+fn list_tracked_files() -> Vec<String> {
+    let out = Command::new("git").args(["ls-files"]).output();
+    match out {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).lines().map(str::to_string).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn should_scan_content(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    // Skip vendor/build dirs
+    if lower.contains("node_modules/") || lower.contains("/.git/")
+        || lower.contains("/dist/") || lower.contains("/build/")
+        || lower.contains("/target/") || lower.contains("/venv/")
+        || lower.contains("/__pycache__/") || lower.contains("/.cargo/")
+    {
+        return false;
+    }
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    // No extension (e.g. .env, Makefile, Dockerfile) or known text extension
+    ext.is_empty()
+        || matches!(
+            ext.as_str(),
+            "env" | "js" | "ts" | "jsx" | "tsx" | "py" | "rb" | "go" | "rs" | "sh"
+                | "bash" | "zsh" | "json" | "yaml" | "yml" | "toml" | "ini" | "conf"
+                | "config" | "xml" | "php" | "java" | "cs" | "cpp" | "c" | "h" | "tf"
+                | "tfvars" | "properties" | "cfg" | "txt" | "md" | "lock"
+        )
+}
+
+fn scan_tracked_file_names(files: &[String]) -> Vec<SecurityFinding> {
+    let mut findings = Vec::new();
+    for file in files {
+        let name = std::path::Path::new(file)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(file);
+        let name_lc = name.to_lowercase();
+
+        // .env files
+        // .env.example / .env.sample / .env.template are intentional templates — downgrade to medium.
+        // All other .env.* variants (.env.production, .env.local, .env.staging, etc.) are HIGH.
+        if name_lc == ".env" || name_lc.starts_with(".env.") {
+            let is_template = matches!(
+                name_lc.as_str(),
+                ".env.example" | ".env.sample" | ".env.template" | ".env.schema"
+            );
+            let (severity, message) = if is_template {
+                (
+                    "medium",
+                    format!(
+                        "{} is tracked by git — verify it contains only placeholder values, not real credentials.",
+                        file
+                    ),
+                )
+            } else {
+                (
+                    "high",
+                    format!("{} is tracked by git — secrets may be exposed.", file),
+                )
+            };
+            findings.push(SecurityFinding {
+                severity: severity.to_string(),
+                kind: "tracked_env_file".to_string(),
+                message,
+                location: Some(file.clone()),
+            });
+        }
+
+        // Private key files by name
+        // Skip files inside vendor/dependency directories — they're not project secrets.
+        let path_lc = file.replace('\\', "/").to_lowercase();
+        let in_vendor = path_lc.contains("/.venv/")
+            || path_lc.contains("/site-packages/")
+            || path_lc.contains("/node_modules/")
+            || path_lc.contains("/.tox/")
+            || path_lc.contains("/vendor/")
+            || path_lc.contains("/target/");
+        // Known CA bundle filenames are not private keys.
+        let is_ca_bundle = matches!(name_lc.as_str(), "cacert.pem" | "ca-bundle.crt" | "ca-bundle.pem" | "ca-certificates.crt");
+        let is_key_file = !in_vendor && !is_ca_bundle && (
+            matches!(
+                name_lc.as_str(),
+                "id_rsa" | "id_ed25519" | "id_ecdsa" | "id_dsa" | "id_ecdsa_sk" | "id_ed25519_sk"
+            ) || (name_lc.ends_with(".pem") && !name_lc.contains("public"))
+                || (name_lc.ends_with(".key") && !name_lc.contains("public"))
+                || name_lc.ends_with(".p12")
+                || name_lc.ends_with(".pfx")
+        );
+        if is_key_file {
+            findings.push(SecurityFinding {
+                severity: "critical".to_string(),
+                kind: "tracked_key_file".to_string(),
+                message: format!("Private key file tracked by git: {}", file),
+                location: Some(file.clone()),
+            });
+        }
+    }
+    findings
+}
+
+pub(crate) fn check_content_patterns(content: &str, file: &str) -> Vec<SecurityFinding> {
+    let patterns: &[(&str, &str, &str)] = &[
+        ("private_key_content", "critical", r"-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY"),
+        ("openai_key",          "high",     r"sk-[A-Za-z0-9_-]{20,}"),
+        ("github_token",        "high",     r"gh[pors]_[A-Za-z0-9]{36,}"),
+        ("aws_key",             "high",     r"AKIA[0-9A-Z]{16}"),
+        ("google_key",          "high",     r"AIza[0-9A-Za-z\-_]{35}"),
+        ("slack_token",         "high",     r"xox[baprs]-[0-9A-Za-z\-_]{10,}"),
+        ("db_credentials",      "high",     r"(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^:@\s/]{1,64}:[^@\s/]{1,64}@"),
+    ];
+    let mut findings = Vec::new();
+    for (kind, severity, pattern) in patterns {
+        let Ok(re) = Regex::new(pattern) else { continue };
+        if re.is_match(content) {
+            let msg = match *kind {
+                "private_key_content" => format!("Private key content detected in {}", file),
+                "openai_key"          => format!("OpenAI API key pattern detected in {}", file),
+                "github_token"        => format!("GitHub token pattern detected in {}", file),
+                "aws_key"             => format!("AWS access key pattern detected in {}", file),
+                "google_key"          => format!("Google API key pattern detected in {}", file),
+                "slack_token"         => format!("Slack token pattern detected in {}", file),
+                "db_credentials"      => format!("Database URL with credentials detected in {}", file),
+                _                     => format!("Secret pattern detected in {}", file),
+            };
+            findings.push(SecurityFinding {
+                severity: severity.to_string(),
+                kind: kind.to_string(),
+                message: msg,
+                location: Some(file.to_string()),
+            });
+        }
+    }
+    findings
+}
+
+fn scan_tracked_file_contents(files: &[String]) -> (Vec<SecurityFinding>, usize) {
+    const MAX_FILE_BYTES: u64 = 100 * 1024;
+    let mut findings = Vec::new();
+    let mut scanned = 0usize;
+    for file in files {
+        if !should_scan_content(file) {
+            continue;
+        }
+        let path = std::path::Path::new(file);
+        let Ok(meta) = std::fs::metadata(path) else { continue };
+        if meta.len() > MAX_FILE_BYTES {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(path) else { continue };
+        scanned += 1;
+        findings.extend(check_content_patterns(&content, file));
+    }
+    (findings, scanned)
+}
+
+fn check_gitignore_completeness(tracked: &[String]) -> Vec<SecurityFinding> {
+    let mut findings = Vec::new();
+    let gitignore_path = std::path::Path::new(".gitignore");
+
+    if !gitignore_path.exists() {
+        findings.push(SecurityFinding {
+            severity: "medium".to_string(),
+            kind: "no_gitignore".to_string(),
+            message: "No .gitignore found — sensitive files may be accidentally committed.".to_string(),
+            location: None,
+        });
+        return findings;
+    }
+
+    let gitignore = std::fs::read_to_string(gitignore_path).unwrap_or_default();
+    let covers_env = gitignore.lines().any(|l| {
+        let l = l.trim();
+        l == ".env" || l == ".env*" || l == "*.env" || l.starts_with(".env.")
+    });
+    if !covers_env {
+        findings.push(SecurityFinding {
+            severity: "medium".to_string(),
+            kind: "missing_env_in_gitignore".to_string(),
+            message: ".env files are not covered by .gitignore — future secrets could be committed.".to_string(),
+            location: Some(".gitignore".to_string()),
+        });
+    }
+
+    // Detect commonly-excluded dirs being tracked
+    let common_dirs = ["node_modules/", "venv/", "dist/", "__pycache__/", ".venv/"];
+    for dir in common_dirs {
+        if tracked.iter().any(|f| f.starts_with(dir) || f.contains(&format!("/{}", dir))) {
+            findings.push(SecurityFinding {
+                severity: "medium".to_string(),
+                kind: "common_files_tracked".to_string(),
+                message: format!("{} is tracked — consider adding it to .gitignore.", dir.trim_end_matches('/')),
+                location: None,
+            });
+        }
+    }
+
+    findings
+}
+
+fn compute_risk_level(findings: &[SecurityFinding]) -> &'static str {
+    if findings.iter().any(|f| f.severity == "critical") {
+        return "Critical";
+    }
+    if findings.iter().any(|f| f.severity == "high") {
+        return "High";
+    }
+    if findings.iter().any(|f| f.severity == "medium") {
+        return "Medium";
+    }
+    "None"
+}
+
+fn build_security_recommendations(findings: &[SecurityFinding]) -> Vec<String> {
+    let mut recs: Vec<String> = Vec::new();
+    let has_high_or_critical = findings.iter().any(|f| f.severity == "critical" || f.severity == "high");
+
+    for f in findings {
+        let rec = match f.kind.as_str() {
+            "tracked_env_file" => {
+                let loc = f.location.as_deref().unwrap_or(".env");
+                if f.severity == "medium" {
+                    // Template files (.env.example etc.) are intentionally committed — verify, don't remove.
+                    format!("Verify that {} contains only placeholder values, not real credentials.", loc)
+                } else {
+                    format!("Remove {} from git tracking: `git rm --cached {}` then add it to .gitignore.", loc, loc)
+                }
+            }
+            "tracked_key_file" => {
+                let loc = f.location.as_deref().unwrap_or("the key file");
+                format!("Revoke and rotate the private key at {} immediately — it may already be exposed.", loc)
+            }
+            "private_key_content" => {
+                let loc = f.location.as_deref().unwrap_or("the file");
+                format!("Rotate the private key material found in {} and remove it from git history.", loc)
+            }
+            "openai_key" => {
+                let loc = f.location.as_deref().unwrap_or("a tracked file");
+                format!("Rotate the OpenAI API key detected in {}.", loc)
+            }
+            "github_token" => {
+                let loc = f.location.as_deref().unwrap_or("a tracked file");
+                format!("Revoke and regenerate the GitHub token found in {}.", loc)
+            }
+            "aws_key" => {
+                let loc = f.location.as_deref().unwrap_or("a tracked file");
+                format!("Rotate the AWS access key in {} immediately via the AWS Console.", loc)
+            }
+            "google_key" => {
+                let loc = f.location.as_deref().unwrap_or("a tracked file");
+                format!("Rotate the Google API key found in {}.", loc)
+            }
+            "slack_token" => {
+                let loc = f.location.as_deref().unwrap_or("a tracked file");
+                format!("Revoke the Slack token found in {}.", loc)
+            }
+            "db_credentials" => {
+                let loc = f.location.as_deref().unwrap_or("a tracked file");
+                format!("Move the database credentials in {} to environment variables.", loc)
+            }
+            "no_gitignore" => "Create a .gitignore and add .env* and other sensitive patterns.".to_string(),
+            "missing_env_in_gitignore" => "Add .env* to .gitignore to prevent future credential exposure.".to_string(),
+            "common_files_tracked" => format!(
+                "Remove {} from git tracking.",
+                f.message.split_whitespace().next().unwrap_or("the directory")
+            ),
+            _ => continue,
+        };
+        if !recs.contains(&rec) {
+            recs.push(rec);
+        }
+    }
+
+    if has_high_or_critical {
+        recs.push("Use `git filter-repo` or BFG Repo Cleaner to purge secrets from git history.".to_string());
+    }
+    recs
+}
+
+fn scan_security() -> SecurityReport {
+    let tracked = list_tracked_files();
+    let mut findings: Vec<SecurityFinding> = Vec::new();
+    findings.extend(scan_tracked_file_names(&tracked));
+    let (content_findings, scanned_count) = scan_tracked_file_contents(&tracked);
+    findings.extend(content_findings);
+    findings.extend(check_gitignore_completeness(&tracked));
+    let risk_level = compute_risk_level(&findings).to_string();
+    let recommendations = build_security_recommendations(&findings);
+    SecurityReport { risk_level, findings, recommendations, scanned_file_count: scanned_count }
+}
+
+fn severity_label(severity: &str) -> &'static str {
+    match severity {
+        "critical" => "🚨 [CRITICAL]",
+        "high"     => "⚠  [HIGH]",
+        "medium"   => "ℹ  [MEDIUM]",
+        _          => "   [INFO]",
+    }
+}
+
+fn render_security_text(report: &SecurityReport) -> String {
+    let mut out = String::new();
+    out.push_str("Security Report\n");
+    out.push_str("===============\n\n");
+
+    if report.findings.is_empty() {
+        out.push_str("✓  No security issues detected.\n\n");
+    } else {
+        out.push_str("Findings\n\n");
+        for f in &report.findings {
+            out.push_str(&format!("{}  {}\n", severity_label(&f.severity), f.message));
+        }
+        out.push('\n');
+    }
+
+    out.push_str(&format!("Risk: {}\n\n", report.risk_level.to_uppercase()));
+
+    // Checklist summary
+    let count_kind = |kind: &str| report.findings.iter().filter(|f| f.kind == kind).count();
+    let has_kind = |kind: &str| count_kind(kind) > 0;
+
+    let check = |found: bool| if found { "⚠ " } else { "✓ " };
+
+    out.push_str("Secrets Summary\n");
+    out.push_str("---------------\n");
+    let env_count = count_kind("tracked_env_file");
+    out.push_str(&format!(
+        "{} .env files tracked      : {}\n",
+        check(env_count > 0),
+        if env_count == 0 { "none".to_string() } else { env_count.to_string() }
+    ));
+    let key_count = count_kind("tracked_key_file") + count_kind("private_key_content");
+    out.push_str(&format!(
+        "{} Private keys             : {}\n",
+        check(key_count > 0),
+        if key_count == 0 { "none".to_string() } else { key_count.to_string() }
+    ));
+    let openai_count = count_kind("openai_key");
+    out.push_str(&format!(
+        "{} OpenAI keys              : {}\n",
+        check(has_kind("openai_key")),
+        if openai_count == 0 { "none".to_string() } else { openai_count.to_string() }
+    ));
+    let github_count = count_kind("github_token");
+    out.push_str(&format!(
+        "{} GitHub tokens            : {}\n",
+        check(has_kind("github_token")),
+        if github_count == 0 { "none".to_string() } else { github_count.to_string() }
+    ));
+    let aws_count = count_kind("aws_key");
+    out.push_str(&format!(
+        "{} AWS keys                 : {}\n",
+        check(has_kind("aws_key")),
+        if aws_count == 0 { "none".to_string() } else { aws_count.to_string() }
+    ));
+    let google_count = count_kind("google_key");
+    out.push_str(&format!(
+        "{} Google API keys          : {}\n",
+        check(has_kind("google_key")),
+        if google_count == 0 { "none".to_string() } else { google_count.to_string() }
+    ));
+    let slack_count = count_kind("slack_token");
+    out.push_str(&format!(
+        "{} Slack tokens             : {}\n",
+        check(has_kind("slack_token")),
+        if slack_count == 0 { "none".to_string() } else { slack_count.to_string() }
+    ));
+    let db_count = count_kind("db_credentials");
+    out.push_str(&format!(
+        "{} DB credentials in code   : {}\n",
+        check(has_kind("db_credentials")),
+        if db_count == 0 { "none".to_string() } else { db_count.to_string() }
+    ));
+    let gitignore_ok = !has_kind("no_gitignore") && !has_kind("missing_env_in_gitignore");
+    out.push_str(&format!(
+        "{} .gitignore covers .env   : {}\n",
+        check(!gitignore_ok),
+        if gitignore_ok { "yes" } else { "no" }
+    ));
+    out.push('\n');
+
+    if !report.recommendations.is_empty() {
+        out.push_str("Recommended Actions\n");
+        for (i, rec) in report.recommendations.iter().enumerate() {
+            out.push_str(&format!("{}. {}\n", i + 1, rec));
+        }
+        out.push('\n');
+    }
+
+    out.push_str(&format!("Scanned {} files.\n", report.scanned_file_count));
+    out
 }
 
 fn collect_git_events(store: &EventStore) -> Result<usize> {
@@ -1425,15 +2297,14 @@ mod tests {
         let anchor_coverage = anchored_event_count as f64 / total_event_count as f64;
         let avg_events_per_feature = total_events_in_features as f64 / feature_count as f64;
         let dominant_anchor_ratio = dominant_anchor_total / feature_count as f64;
-        store.complete_feature_run(
-            run_id,
+        store.complete_feature_run(run_id, FeatureRunMetrics {
             feature_count,
             anchor_coverage,
             anchored_feature_count,
             unanchored_feature_count,
             avg_events_per_feature,
             dominant_anchor_ratio,
-        )?;
+        })?;
 
         let runs = store.list_feature_runs()?;
         assert_eq!(runs.len(), 1);
@@ -1506,5 +2377,336 @@ mod tests {
         let evidence_strength = estimate_evidence_strength(&feature, &events);
         let health = classify_feature_health(&feature, 0.85, &evidence_strength);
         assert_eq!(health, "Weak Evidence");
+    }
+
+    // --- evolith doctor tests ---
+
+    fn make_run(
+        anchor_coverage: f64,
+        dominant_anchor_ratio: f64,
+        feature_count: i64,
+        anchored: i64,
+        unanchored: i64,
+        avg_events: f64,
+    ) -> event_store::FeatureRun {
+        event_store::FeatureRun {
+            id: Uuid::new_v4(),
+            status: "completed".to_string(),
+            algorithm_version: FEATURE_ALGO_VERSION.to_string(),
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            event_count: (feature_count as f64 * avg_events) as i64,
+            feature_count,
+            anchor_coverage,
+            anchored_feature_count: anchored,
+            unanchored_feature_count: unanchored,
+            avg_events_per_feature: avg_events,
+            dominant_anchor_ratio,
+        }
+    }
+
+    fn make_feature_with_commits(commit_count: i64) -> Feature {
+        Feature {
+            id: Uuid::new_v4(),
+            project_id: "proj-1".to_string(),
+            title: "Pattern auth".to_string(),
+            status: "active".to_string(),
+            evidence_json: serde_json::json!({
+                "commit_count": commit_count,
+                "episode_count": 1,
+                "ticket_ids": [],
+                "pr_ids": [],
+                "branches": [],
+                "dominant_anchor_ratio": 0.8
+            }),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn doctor_good_health_for_bravely_like_run() {
+        // Bravely M2.2-like: high coverage, strong identity, healthy avg
+        let run = make_run(0.75, 0.85, 9, 8, 1, 8.5);
+        let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(8)).collect();
+        let report = build_doctor_report(&run, &features, SecurityReport::empty());
+        assert_eq!(report.repository_health, "Good");
+        assert!(report.scoring.overall_score >= 0.75);
+        assert!(report.recommendations.is_empty());
+    }
+
+    #[test]
+    fn doctor_moderate_for_trx_ai_like_run() {
+        // TRX-AI-like: low anchor coverage, moderate identity
+        let run = make_run(0.228, 0.56, 9, 5, 4, 6.33);
+        let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(4)).collect();
+        let report = build_doctor_report(&run, &features, SecurityReport::empty());
+        assert!(
+            report.repository_health == "Moderate" || report.repository_health == "Poor",
+            "expected Moderate or Poor, got {}",
+            report.repository_health
+        );
+        assert!(!report.recommendations.is_empty());
+    }
+
+    #[test]
+    fn doctor_fragmentation_rule_triggers_when_avg_below_threshold() {
+        let run = make_run(0.50, 0.70, 10, 8, 2, 1.5); // avg_events < 2.0
+        let features: Vec<Feature> = (0..10).map(|_| make_feature_with_commits(1)).collect();
+        let report = build_doctor_report(&run, &features, SecurityReport::empty());
+        let has_frag = report.recommendations.iter().any(|r| r.id == "fragmentation");
+        assert!(has_frag, "fragmentation rule should trigger when avg_events_per_feature < 2.0");
+    }
+
+    #[test]
+    fn doctor_no_fragmentation_when_avg_is_healthy() {
+        let run = make_run(0.60, 0.75, 8, 7, 1, 10.0);
+        let features: Vec<Feature> = (0..8).map(|_| make_feature_with_commits(8)).collect();
+        let report = build_doctor_report(&run, &features, SecurityReport::empty());
+        let has_frag = report.recommendations.iter().any(|r| r.id == "fragmentation");
+        assert!(!has_frag, "fragmentation rule should not trigger for healthy avg_events_per_feature");
+    }
+
+    #[test]
+    fn doctor_json_report_has_required_fields() {
+        let run = make_run(0.228, 0.56, 9, 5, 4, 6.33);
+        let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(4)).collect();
+        let report = build_doctor_report(&run, &features, SecurityReport::empty());
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json.get("run_id").is_some());
+        assert!(json.get("repository_health").is_some());
+        assert!(json.get("metrics").is_some());
+        assert!(json.get("recommendations").is_some());
+        assert!(json.get("issues").is_some());
+        assert!(json.get("scoring").is_some());
+        let metrics = json.get("metrics").unwrap();
+        assert!(metrics.get("anchor_coverage").is_some());
+        assert!(metrics.get("dominant_anchor_ratio").is_some());
+        assert!(metrics.get("weak_evidence_rate").is_some());
+    }
+
+    #[test]
+    fn doctor_text_output_leads_with_repository_summary() {
+        let run = make_run(0.228, 0.56, 9, 5, 4, 6.33);
+        let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(4)).collect();
+        let report = build_doctor_report(&run, &features, SecurityReport::empty());
+        let text = render_doctor_text(&report);
+        assert!(text.starts_with("Repository Summary"), "text output must start with Repository Summary");
+        let health_pos = text.find("Repository Health:").unwrap();
+        let summary_pos = text.find("Repository Summary").unwrap();
+        assert!(summary_pos < health_pos, "summary must appear before health score");
+        assert!(!text.contains("anchor_coverage"), "raw metric keys must not appear in text output");
+        assert!(!text.contains("dominant_anchor_ratio"), "raw metric keys must not appear in text output");
+    }
+
+    #[test]
+    fn doctor_text_output_contains_details_section() {
+        let run = make_run(0.50, 0.70, 9, 7, 2, 6.0);
+        let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(6)).collect();
+        let report = build_doctor_report(&run, &features, SecurityReport::empty());
+        let text = render_doctor_text(&report);
+        assert!(text.contains("Details\n-------"), "text output must contain Details section");
+        assert!(text.contains("Anchor Coverage:"), "Details must include Anchor Coverage");
+        assert!(text.contains("Dominant Anchor Ratio:"), "Details must include Dominant Anchor Ratio");
+    }
+
+    #[test]
+    fn doctor_over_merge_rule_triggers() {
+        let run = make_run(0.80, 0.85, 3, 3, 0, 30.0); // avg_events > 25.0
+        let features: Vec<Feature> = (0..3).map(|_| make_feature_with_commits(30)).collect();
+        let report = build_doctor_report(&run, &features, SecurityReport::empty());
+        let has_over_merge = report.recommendations.iter().any(|r| r.id == "over_merge_risk");
+        assert!(has_over_merge, "over-merge rule should trigger when avg_events_per_feature > 25.0");
+    }
+
+    #[test]
+    fn doctor_recommendations_are_deterministic() {
+        let run = make_run(0.228, 0.56, 9, 5, 4, 6.33);
+        let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(4)).collect();
+        let report1 = build_doctor_report(&run, &features, SecurityReport::empty());
+        let report2 = build_doctor_report(&run, &features, SecurityReport::empty());
+        let ids1: Vec<&str> = report1.recommendations.iter().map(|r| r.id.as_str()).collect();
+        let ids2: Vec<&str> = report2.recommendations.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids1, ids2, "recommendations must be deterministic across repeated calls");
+    }
+
+    // --- RFC-007: Security & Safety tests ---
+
+    #[test]
+    fn security_detects_env_file_by_name() {
+        let files = vec![
+            ".env".to_string(),
+            "src/app.js".to_string(),
+            ".env.production".to_string(),
+            ".env.local".to_string(),
+            ".env.example".to_string(),  // template — should be medium, not high
+        ];
+        let findings = scan_tracked_file_names(&files);
+        let env: Vec<_> = findings.iter().filter(|f| f.kind == "tracked_env_file").collect();
+        assert_eq!(env.len(), 4, "should detect all four .env variants");
+        let high: Vec<_> = env.iter().filter(|f| f.severity == "high").collect();
+        let medium: Vec<_> = env.iter().filter(|f| f.severity == "medium").collect();
+        assert_eq!(high.len(), 3, ".env, .env.production, .env.local should be high");
+        assert_eq!(medium.len(), 1, ".env.example should be medium");
+    }
+
+    #[test]
+    fn security_detects_private_key_file_by_name() {
+        let files = vec![
+            "id_rsa".to_string(),
+            "server.pem".to_string(),
+            "deploy.key".to_string(),
+            "public.key".to_string(),   // has "public" in name — should NOT flag
+            "src/index.ts".to_string(), // normal file — should NOT flag
+        ];
+        let findings = scan_tracked_file_names(&files);
+        let keys: Vec<_> = findings.iter().filter(|f| f.kind == "tracked_key_file").collect();
+        assert!(keys.iter().any(|f| f.location.as_deref() == Some("id_rsa")));
+        assert!(keys.iter().any(|f| f.location.as_deref() == Some("server.pem")));
+        assert!(!keys.iter().any(|f| f.location.as_deref() == Some("public.key")), "public key should not be flagged");
+        assert!(keys.iter().all(|f| f.severity == "critical"));
+    }
+
+    #[test]
+    fn security_content_detects_aws_key_pattern() {
+        let content = "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE";
+        let findings = check_content_patterns(content, "config.sh");
+        let aws: Vec<_> = findings.iter().filter(|f| f.kind == "aws_key").collect();
+        assert!(!aws.is_empty(), "AWS key pattern should be detected");
+        assert_eq!(aws[0].severity, "high");
+    }
+
+    #[test]
+    fn security_content_detects_private_key_header() {
+        let content = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----";
+        let findings = check_content_patterns(content, "keys/server.pem");
+        let pk: Vec<_> = findings.iter().filter(|f| f.kind == "private_key_content").collect();
+        assert!(!pk.is_empty(), "private key header should be detected");
+        assert_eq!(pk[0].severity, "critical");
+    }
+
+    #[test]
+    fn security_content_detects_openssh_private_key() {
+        let content = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk...\n-----END OPENSSH PRIVATE KEY-----";
+        let findings = check_content_patterns(content, "id_ed25519");
+        assert!(findings.iter().any(|f| f.kind == "private_key_content"));
+    }
+
+    #[test]
+    fn security_content_detects_db_url_with_credentials() {
+        let content = r#"DATABASE_URL=postgres://admin:s3cr3t@db.example.com:5432/mydb"#;
+        let findings = check_content_patterns(content, ".env");
+        assert!(findings.iter().any(|f| f.kind == "db_credentials"), "DB URL with credentials should be detected");
+    }
+
+    #[test]
+    fn security_content_no_false_positive_for_clean_db_url() {
+        let content = "DATABASE_URL=postgres://localhost:5432/mydb"; // no password
+        let findings = check_content_patterns(content, "config.py");
+        assert!(!findings.iter().any(|f| f.kind == "db_credentials"), "DB URL without credentials should not trigger");
+    }
+
+    #[test]
+    fn security_risk_level_critical_for_private_key() {
+        let findings = vec![SecurityFinding {
+            severity: "critical".to_string(),
+            kind: "tracked_key_file".to_string(),
+            message: "Private key".to_string(),
+            location: Some("id_rsa".to_string()),
+        }];
+        assert_eq!(compute_risk_level(&findings), "Critical");
+    }
+
+    #[test]
+    fn security_risk_level_high_for_env_file() {
+        let findings = vec![SecurityFinding {
+            severity: "high".to_string(),
+            kind: "tracked_env_file".to_string(),
+            message: ".env tracked".to_string(),
+            location: Some(".env".to_string()),
+        }];
+        assert_eq!(compute_risk_level(&findings), "High");
+    }
+
+    #[test]
+    fn security_risk_level_none_when_clean() {
+        assert_eq!(compute_risk_level(&[]), "None");
+    }
+
+    #[test]
+    fn security_recommendations_include_history_cleanup_for_high_findings() {
+        let findings = vec![SecurityFinding {
+            severity: "high".to_string(),
+            kind: "openai_key".to_string(),
+            message: "OpenAI key in config.js".to_string(),
+            location: Some("config.js".to_string()),
+        }];
+        let recs = build_security_recommendations(&findings);
+        let has_filter_repo = recs.iter().any(|r| r.contains("filter-repo") || r.contains("BFG"));
+        assert!(has_filter_repo, "should recommend git history cleanup for high-severity findings");
+    }
+
+    #[test]
+    fn security_json_report_has_correct_shape() {
+        let report = SecurityReport {
+            risk_level: "High".to_string(),
+            findings: vec![SecurityFinding {
+                severity: "high".to_string(),
+                kind: "tracked_env_file".to_string(),
+                message: ".env tracked".to_string(),
+                location: Some(".env".to_string()),
+            }],
+            recommendations: vec!["Add .env to .gitignore.".to_string()],
+            scanned_file_count: 42,
+        };
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json.get("risk_level").is_some());
+        assert!(json.get("findings").is_some());
+        assert!(json.get("recommendations").is_some());
+        assert!(json.get("scanned_file_count").is_some());
+        assert_eq!(json["findings"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn security_text_report_starts_with_security_report_header() {
+        let report = SecurityReport::empty();
+        let text = render_security_text(&report);
+        assert!(text.starts_with("Security Report\n"), "security text must start with 'Security Report'");
+        assert!(text.contains("✓  No security issues detected."));
+    }
+
+    #[test]
+    fn doctor_text_always_contains_security_section() {
+        let run = make_run(0.75, 0.85, 9, 8, 1, 8.5);
+        let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(8)).collect();
+        let report = build_doctor_report(&run, &features, SecurityReport::empty());
+        let text = render_doctor_text(&report);
+        assert!(text.contains("Security & Safety"), "doctor text must include Security & Safety section");
+        assert!(text.contains("✓  No security issues detected."), "clean repo should show no issues");
+    }
+
+    #[test]
+    fn doctor_text_shows_security_findings_when_present() {
+        let run = make_run(0.75, 0.85, 9, 8, 1, 8.5);
+        let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(8)).collect();
+        let sec = SecurityReport {
+            risk_level: "High".to_string(),
+            findings: vec![SecurityFinding {
+                severity: "high".to_string(),
+                kind: "tracked_env_file".to_string(),
+                message: ".env.production is tracked by git — secrets may be exposed.".to_string(),
+                location: Some(".env.production".to_string()),
+            }],
+            recommendations: vec!["Remove .env.production from git tracking.".to_string()],
+            scanned_file_count: 10,
+        };
+        let report = build_doctor_report(&run, &features, sec);
+        let text = render_doctor_text(&report);
+        assert!(text.contains("Risk: High"), "should show risk level when findings exist");
+        assert!(text.contains(".env.production is tracked by git"), "should show finding message");
+        // Security recommendation should appear before workflow recommendations
+        let sec_pos = text.find("Remove .env.production").unwrap();
+        let health_pos = text.find("Repository Health:").unwrap();
+        assert!(sec_pos > health_pos, "security rec should appear after health header");
     }
 }
