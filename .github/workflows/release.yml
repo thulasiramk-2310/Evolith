@@ -52,20 +52,45 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
+      - name: Write README.txt
+        shell: bash
+        run: |
+          cat > README.txt <<'EOF'
+          Evolith — Project Memory Doctor
+          ================================
+
+          Quick start
+          -----------
+          1. cd your-project
+          2. evolith init
+          3. evolith collect git
+          4. evolith features rebuild
+          5. evolith doctor
+
+          Options
+          -------
+          evolith doctor --security    security-only scan
+          evolith doctor --verbose     show raw metric numbers
+          evolith doctor --json        machine-readable output
+
+          Full docs: https://github.com/thulasiramk-2310/Evolith
+          EOF
+
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           Compress-Archive `
-            -Path "target/${{ matrix.target }}/release/${{ matrix.binary }}" `
+            -Path "target/${{ matrix.target }}/release/${{ matrix.binary }}","README.txt" `
             -DestinationPath "${{ matrix.asset_name }}"
 
       - name: Package (macOS / Linux)
         if: runner.os != 'Windows'
         run: |
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" .
           tar -czf "${{ matrix.asset_name }}" \
-            -C "target/${{ matrix.target }}/release" \
-            "${{ matrix.binary }}"
+            "${{ matrix.binary }}" \
+            README.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -38,6 +38,9 @@ enum Commands {
         /// Show a focused security-only report (no feature run required)
         #[arg(long)]
         security: bool,
+        /// Show raw metric numbers alongside the report
+        #[arg(long)]
+        verbose: bool,
     },
 }
 
@@ -653,7 +656,7 @@ fn main() -> Result<()> {
                 }
             }
         },
-        Commands::Doctor { json, security } => {
+        Commands::Doctor { json, security, verbose } => {
             if *security {
                 // Security-only mode — no feature run required
                 let sec = scan_security();
@@ -687,7 +690,7 @@ fn main() -> Result<()> {
             if *json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
-                print!("{}", render_doctor_text(&report, &repo_kind));
+                print!("{}", render_doctor_text(&report, &repo_kind, *verbose));
             }
         }
     }
@@ -1698,7 +1701,7 @@ fn build_doctor_report(
     }
 }
 
-fn render_doctor_text(report: &DoctorReport, repo_kind: &RepoKind) -> String {
+fn render_doctor_text(report: &DoctorReport, repo_kind: &RepoKind, verbose: bool) -> String {
     let mut out = String::new();
     let sep = "─".repeat(48);
     let security_leads = matches!(report.security.risk_level.as_str(), "Critical" | "High");
@@ -1820,7 +1823,10 @@ fn render_doctor_text(report: &DoctorReport, repo_kind: &RepoKind) -> String {
         out.push_str(&format!("{sep}\n\n"));
     }
 
-    // ── Details ──────────────────────────────────────────────────────────
+    // ── Details (opt-in via --verbose) ───────────────────────────────────
+    if !verbose {
+        return out;
+    }
     out.push_str("Details\n");
     out.push_str(&format!("{sep}\n"));
     out.push_str(&format!(
@@ -1924,7 +1930,7 @@ fn scan_tracked_file_names(files: &[String]) -> Vec<SecurityFinding> {
             } else {
                 (
                     "high",
-                    format!("{} is tracked by git — secrets may be exposed.", file),
+                    format!("{} is tracked by git — anyone with repo access can read its contents.", file),
                 )
             };
             findings.push(SecurityFinding {
@@ -1959,7 +1965,7 @@ fn scan_tracked_file_names(files: &[String]) -> Vec<SecurityFinding> {
             findings.push(SecurityFinding {
                 severity: "critical".to_string(),
                 kind: "tracked_key_file".to_string(),
-                message: format!("Private key file tracked by git: {}", file),
+                message: format!("Private key file tracked by git: {} — provides direct authentication credentials to anyone who clones this repo.", file),
                 location: Some(file.clone()),
             });
         }
@@ -1982,13 +1988,13 @@ pub(crate) fn check_content_patterns(content: &str, file: &str) -> Vec<SecurityF
         let Ok(re) = Regex::new(pattern) else { continue };
         if re.is_match(content) {
             let msg = match *kind {
-                "private_key_content" => format!("Private key content detected in {}", file),
-                "openai_key"          => format!("OpenAI API key pattern detected in {}", file),
-                "github_token"        => format!("GitHub token pattern detected in {}", file),
-                "aws_key"             => format!("AWS access key pattern detected in {}", file),
-                "google_key"          => format!("Google API key pattern detected in {}", file),
-                "slack_token"         => format!("Slack token pattern detected in {}", file),
-                "db_credentials"      => format!("Database URL with credentials detected in {}", file),
+                "private_key_content" => format!("Private key content found in {} — anyone with repo access can use it to authenticate as you.", file),
+                "openai_key"          => format!("OpenAI API key found in {} — could be used to run up charges on your account.", file),
+                "github_token"        => format!("GitHub token found in {} — grants access to GitHub repositories and APIs.", file),
+                "aws_key"             => format!("AWS access key found in {} — could allow access to your cloud infrastructure.", file),
+                "google_key"          => format!("Google API key found in {} — could incur charges or expose Google services.", file),
+                "slack_token"         => format!("Slack token found in {} — could allow reading or sending messages in your workspace.", file),
+                "db_credentials"      => format!("Database URL with credentials found in {} — exposes direct database access.", file),
                 _                     => format!("Secret pattern detected in {}", file),
             };
             findings.push(SecurityFinding {
@@ -2757,7 +2763,7 @@ mod tests {
         let run = make_run(0.228, 0.56, 9, 5, 4, 6.33);
         let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(4)).collect();
         let report = build_doctor_report(&run, &features, SecurityReport::empty(), RepoKind::Unknown);
-        let text = render_doctor_text(&report, &RepoKind::Unknown);
+        let text = render_doctor_text(&report, &RepoKind::Unknown, false);
         assert!(text.starts_with("Project Story"), "text output must start with Project Story");
         let health_pos = text.find("Project Story:").unwrap_or(usize::MAX);
         let summary_pos = text.find("Project Story  ·").unwrap();
@@ -2771,7 +2777,7 @@ mod tests {
         let run = make_run(0.50, 0.70, 9, 7, 2, 6.0);
         let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(6)).collect();
         let report = build_doctor_report(&run, &features, SecurityReport::empty(), RepoKind::Unknown);
-        let text = render_doctor_text(&report, &RepoKind::Unknown);
+        let text = render_doctor_text(&report, &RepoKind::Unknown, true);
         assert!(text.contains("Details\n"), "text output must contain Details section");
         assert!(text.contains("Identity Coverage:"), "Details must include Identity Coverage");
         assert!(text.contains("Feature Consistency:"), "Details must include Feature Consistency");
@@ -2947,7 +2953,7 @@ mod tests {
         let run = make_run(0.75, 0.85, 9, 8, 1, 8.5);
         let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(8)).collect();
         let report = build_doctor_report(&run, &features, SecurityReport::empty(), RepoKind::Unknown);
-        let text = render_doctor_text(&report, &RepoKind::Unknown);
+        let text = render_doctor_text(&report, &RepoKind::Unknown, false);
         assert!(text.contains("Security Notes"), "doctor text must include Security Notes section");
         assert!(text.contains("✓  No credentials or secrets detected."), "clean repo should show no issues");
     }
@@ -2968,7 +2974,7 @@ mod tests {
             scanned_file_count: 10,
         };
         let report = build_doctor_report(&run, &features, sec, RepoKind::Unknown);
-        let text = render_doctor_text(&report, &RepoKind::Unknown);
+        let text = render_doctor_text(&report, &RepoKind::Unknown, false);
         assert!(text.contains("Needs Attention") || text.contains("Secrets Exposed"), "should show attention status when findings exist");
         assert!(text.contains(".env.production is tracked by git"), "should show finding message");
         // Security alert leads when High/Critical, health appears after
