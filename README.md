@@ -65,15 +65,15 @@ That's it.
 ### `evolith doctor`
 
 ```
-Project Memory
+Project Story  ·  Team Project
 ────────────────────────────────────────────────
 
-Your project has 63 commits across 21 features.
+Your team has 63 commits across 21 features. Evolith can clearly read 14 of them.
 
   ✓  14 features are clearly identified
   ⚠  7 features have limited or unknown history
 
-Repository Health:  Room to Improve
+Project Story:  Forming
 
 ────────────────────────────────────────────────
 
@@ -169,7 +169,7 @@ Evolith reads this history and answers three questions:
 | Question | Command |
 |---|---|
 | What was actually built? | `evolith features list` |
-| Is the history understandable? | `evolith doctor` |
+| How readable is my project history? | `evolith doctor` |
 | Did anything sensitive leak? | `evolith doctor --security` |
 
 ---
@@ -181,7 +181,7 @@ flowchart LR
     A[("<b>Git Repository</b>")] -->|"evolith collect git"| B[("<b>Event Store</b><br/>SQLite · local")]
     B -->|"evolith features rebuild"| C{"<b>Anchor-Assisted<br/>Reconstruction</b><br/>ticket IDs · PR refs<br/>branch names"}
     C --> D["🧠 <b>Project Memory</b><br/>Features<br/>Explainability"]
-    C --> E["🏥 <b>Repository Health</b><br/>Health score<br/>Plain-language diagnosis"]
+    C --> E["📖 <b>Project Story</b><br/>Clear / Forming / Thin<br/>Plain-language diagnosis"]
     C --> F["🔒 <b>Security Notes</b><br/>Credential detection<br/>Offline · read-only"]
     D --> G(["<b>evolith doctor</b>"])
     E --> G
