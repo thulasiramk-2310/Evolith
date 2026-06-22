@@ -98,6 +98,151 @@ const DOCTOR_OVER_MERGE_THRESHOLD: f64 = 25.0;
 const DOCTOR_WEAK_RATE_POOR: f64 = 0.40;
 const DOCTOR_WEAK_RATE_WARN: f64 = 0.30;
 
+// ─── Repository Kind Detection ─────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RepoKind {
+    Personal,
+    Team,
+    OpenSource,
+    AiMl,
+    Production,
+    CliTool,
+    Library,
+    Hackathon,
+    Unknown,
+}
+
+impl RepoKind {
+    fn label(&self) -> &'static str {
+        match self {
+            RepoKind::Personal    => "Personal Project",
+            RepoKind::Team        => "Team Project",
+            RepoKind::OpenSource  => "Open Source Project",
+            RepoKind::AiMl        => "AI / ML Project",
+            RepoKind::Production  => "Production Project",
+            RepoKind::CliTool     => "CLI Tool",
+            RepoKind::Library     => "Library",
+            RepoKind::Hackathon   => "Hackathon / Student Project",
+            RepoKind::Unknown     => "Project",
+        }
+    }
+
+    fn opening_line(&self, readable: i64, total: i64) -> String {
+        let pct = if total > 0 { readable * 100 / total } else { 0 };
+        match self {
+            RepoKind::Personal => format!(
+                "This is a personal project. Evolith can follow {pct}% of your history."
+            ),
+            RepoKind::Hackathon => format!(
+                "This looks like a hackathon or student project — quick, sparse commits are normal.\n  Evolith can trace {pct}% of your project's story so far."
+            ),
+            RepoKind::AiMl => format!(
+                "This is an AI / ML project. Evolith can trace {pct}% of your experiments and iterations."
+            ),
+            RepoKind::Production => format!(
+                "This is a production project. Evolith can follow {pct}% of your team's history."
+            ),
+            RepoKind::OpenSource => format!(
+                "This is an open source project. Evolith can read {pct}% of the public contribution history."
+            ),
+            RepoKind::CliTool => format!(
+                "This is a CLI tool. Evolith can trace {pct}% of your development arc."
+            ),
+            RepoKind::Library => format!(
+                "This is a library. Evolith can follow {pct}% of the API evolution history."
+            ),
+            RepoKind::Team => format!(
+                "This is a team project. Evolith can follow {pct}% of your shared history."
+            ),
+            RepoKind::Unknown => format!(
+                "Evolith can follow {pct}% of this project's history."
+            ),
+        }
+    }
+
+    fn context_note(&self) -> Option<&'static str> {
+        match self {
+            RepoKind::Personal  => Some("Personal projects often have informal commits — that's completely fine. These notes help Evolith follow your story, not grade your style."),
+            RepoKind::Hackathon => Some("Hackathon commits are fast and scrappy by design. Evolith won't ask you to slow down — just a few small hints help it read your progress."),
+            RepoKind::AiMl      => Some("ML projects often have lots of exploratory commits. Naming your experiments in commit messages helps Evolith trace your research arc."),
+            _                   => None,
+        }
+    }
+
+    fn action_header(&self) -> &'static str {
+        match self {
+            RepoKind::Personal | RepoKind::Hackathon => "What Would Help",
+            _ => "What To Do",
+        }
+    }
+
+    fn filter_recommendation(&self, id: &str) -> bool {
+        match self {
+            RepoKind::Personal | RepoKind::Hackathon => {
+                // Skip over-merge advice for tiny personal projects
+                id != "over_merge_risk"
+            }
+            _ => true,
+        }
+    }
+}
+
+fn count_git_contributors() -> usize {
+    let out = Command::new("git").args(["log", "--format=%ae"]).output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let unique: std::collections::HashSet<&str> =
+                text.lines().filter(|l| !l.is_empty()).collect();
+            unique.len().max(1)
+        }
+        _ => 1,
+    }
+}
+
+fn detect_repo_kind(files: &[String], contributors: usize, commit_count: i64) -> RepoKind {
+    let lower: Vec<String> = files.iter().map(|f| f.to_lowercase()).collect();
+    let has = |pat: &str| lower.iter().any(|f| f.contains(pat));
+
+    let has_notebooks   = has(".ipynb");
+    let has_docker      = has("dockerfile") || has("docker-compose");
+    let has_ci          = has(".github/workflows/") || has(".gitlab-ci") || has(".circleci/");
+    let has_contributing = has("contributing.md");
+    let has_cargo       = has("cargo.toml");
+    let has_lib_rs      = has("src/lib.rs");
+    let has_main_rs     = has("src/main.rs");
+    let has_lib_only    = has_lib_rs && !has_main_rs;
+    let has_ml          = has_notebooks || (has("requirements.txt") && (has("train") || has("model") || has("notebook")));
+
+    if has_ml || has_notebooks {
+        return RepoKind::AiMl;
+    }
+    if contributors >= 10 || has_contributing {
+        return RepoKind::OpenSource;
+    }
+    if (has_docker || has_ci) && contributors >= 2 {
+        return RepoKind::Production;
+    }
+    if has_lib_only {
+        return RepoKind::Library;
+    }
+    if has_cargo && !has_docker && contributors <= 2 {
+        return RepoKind::CliTool;
+    }
+    if contributors == 1 && commit_count < 25 {
+        return RepoKind::Hackathon;
+    }
+    if contributors == 1 {
+        return RepoKind::Personal;
+    }
+    if contributors >= 2 {
+        return RepoKind::Team;
+    }
+    RepoKind::Unknown
+}
+
 fn get_db_path() -> PathBuf {
     let legacy = Path::new(".devreplay");
     if legacy.exists() && !Path::new(".evolith").exists() {
@@ -535,11 +680,14 @@ fn main() -> Result<()> {
             };
             let features = store.list_features()?;
             let security_report = scan_security();
-            let report = build_doctor_report(&run, &features, security_report);
+            let tracked = list_tracked_files();
+            let contributors = count_git_contributors();
+            let repo_kind = detect_repo_kind(&tracked, contributors, run.event_count);
+            let report = build_doctor_report(&run, &features, security_report, repo_kind.clone());
             if *json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
-                print!("{}", render_doctor_text(&report));
+                print!("{}", render_doctor_text(&report, &repo_kind));
             }
         }
     }
@@ -928,6 +1076,7 @@ struct DoctorReport {
     ruleset_version: String,
     status: String,
     repository_health: String,
+    repo_kind: String,
     security: SecurityReport,
     metrics: DoctorMetrics,
     issues: Vec<String>,
@@ -1236,34 +1385,34 @@ fn classify_feature_health(feature: &Feature, anchor_confidence: f64, evidence_s
     let is_episode_candidate = title_lower.contains("episode candidate");
 
     if is_episode_candidate && evidence_strength.label == "Weak" {
-        return "Limited History";
+        return "Needs More Context";
     }
     if evidence_strength.label == "Weak" {
-        return "Limited History";
+        return "Needs More Context";
     }
     if anchor_confidence < 0.50 && evidence_strength.score >= 0.40 {
         return "Mixed Signals";
     }
     if anchor_confidence < 0.65 || evidence_strength.label == "Moderate" {
-        return "Scattered Commits";
+        return "Not Fully Readable";
     }
     "Well Defined"
 }
 
 fn classify_run_health(run: &event_store::FeatureRun) -> &'static str {
     if run.status != "completed" {
-        return "Needs Review";
+        return "Thin";
     }
     if run.anchored_feature_count > run.unanchored_feature_count
         && run.anchor_coverage >= 0.30
         && run.dominant_anchor_ratio >= 0.60
     {
-        return "Great Shape";
+        return "Clear";
     }
     if run.anchor_coverage >= 0.20 && run.dominant_anchor_ratio >= 0.50 {
-        return "Room to Improve";
+        return "Forming";
     }
-    "Needs Review"
+    "Thin"
 }
 
 fn build_run_observations(run: &event_store::FeatureRun) -> Vec<String> {
@@ -1355,73 +1504,100 @@ fn compute_doctor_score(run: &event_store::FeatureRun, weak_rate: f64) -> f64 {
 
 fn classify_health_band(score: f64) -> &'static str {
     if score >= 0.75 {
-        "Great Shape"
+        "Clear"
     } else if score >= 0.50 {
-        "Room to Improve"
+        "Forming"
     } else {
-        "Needs Attention"
+        "Thin"
     }
 }
 
 fn build_doctor_recommendations(
     run: &event_store::FeatureRun,
     weak_rate: f64,
+    repo_kind: &RepoKind,
 ) -> Vec<DoctorRecommendation> {
     let mut recs: Vec<DoctorRecommendation> = Vec::new();
 
-    // Rule A: Low anchor coverage
+    // Choose wording based on who's reading
+    let (commit_anchor_msg, pr_ref_msg, branch_msg, ticket_msg, consistency_msg) =
+        match repo_kind {
+            RepoKind::Personal | RepoKind::Hackathon => (
+                "Add a short note in your commit messages about what you were working on (e.g. \"auth - adding login flow\").",
+                "If you open a PR, mention what it covers in the title.",
+                "Name your branches after the thing you're building (e.g. \"add-login\", \"fix-crash\").",
+                "A quick feature tag in your commits (e.g. \"login:\", \"ui:\") helps Evolith follow your story.",
+                "Try to keep one thing per commit — it makes your history much easier to read.",
+            ),
+            RepoKind::AiMl => (
+                "Name your experiments in commit messages (e.g. \"exp/bert-v2: add dropout layer\").",
+                "Reference your PR or experiment branch when merging results.",
+                "Use branch names that reflect the experiment (e.g. \"exp/gpt-finetune\").",
+                "Tag your commits with an experiment ID so Evolith can group related runs.",
+                "Separate data prep, training, and evaluation into distinct commits.",
+            ),
+            _ => (
+                "Include ticket IDs in commit messages (e.g. AUTH-123, PROJ-42).",
+                "Reference PR numbers in merge and commit messages (e.g. #123).",
+                "Use descriptive branch names tied to features or tickets.",
+                "Include ticket references in commit messages consistently.",
+                "Avoid mixing unrelated changes on the same branch or commit.",
+            ),
+        };
+
+    // Rule A: Low identity coverage
     if run.anchor_coverage < DOCTOR_ANCHOR_COV_LOW {
         recs.push(DoctorRecommendation {
             id: "low_anchor_coverage_commit_anchors".to_string(),
             priority: "high".to_string(),
-            message: "Include ticket IDs in commit messages (e.g. AUTH-123, PROJ-42).".to_string(),
+            message: commit_anchor_msg.to_string(),
             expected_impact: "Identity Coverage +15–25%".to_string(),
         });
         recs.push(DoctorRecommendation {
             id: "low_anchor_coverage_pr_refs".to_string(),
             priority: "high".to_string(),
-            message: "Reference PR numbers in merge and commit messages (e.g. #123, PR-123).".to_string(),
+            message: pr_ref_msg.to_string(),
             expected_impact: "Identity Coverage +15–25%".to_string(),
         });
     } else if run.anchor_coverage < DOCTOR_ANCHOR_COV_WARN {
         recs.push(DoctorRecommendation {
             id: "moderate_anchor_coverage_branch_naming".to_string(),
             priority: "medium".to_string(),
-            message: "Use descriptive branch names tied to features or tickets.".to_string(),
+            message: branch_msg.to_string(),
             expected_impact: "Identity Coverage +8–15%".to_string(),
         });
         recs.push(DoctorRecommendation {
             id: "moderate_anchor_coverage_ticket_refs".to_string(),
             priority: "medium".to_string(),
-            message: "Include ticket references in commit messages consistently.".to_string(),
+            message: ticket_msg.to_string(),
             expected_impact: "Identity Coverage +8–15%".to_string(),
         });
     }
 
-    // Rule B: Low dominant anchor ratio
+    // Rule B: Low feature consistency
     if run.dominant_anchor_ratio < DOCTOR_DOM_RATIO_POOR {
         recs.push(DoctorRecommendation {
             id: "low_identity_consistency".to_string(),
             priority: "high".to_string(),
-            message: "Avoid mixing unrelated changes on the same branch or commit.".to_string(),
+            message: consistency_msg.to_string(),
             expected_impact: "Feature Consistency +0.10–0.25".to_string(),
         });
     } else if run.dominant_anchor_ratio < DOCTOR_DOM_RATIO_WARN {
         recs.push(DoctorRecommendation {
             id: "moderate_identity_consistency".to_string(),
             priority: "medium".to_string(),
-            message: "Use stable work-item references across commits in the same feature.".to_string(),
+            message: "Use stable references across commits in the same feature.".to_string(),
             expected_impact: "Feature Consistency +0.05–0.15".to_string(),
         });
     }
 
-    // Rule C: High weak-evidence rate
+    // Rule C: Many thin features
     if weak_rate > DOCTOR_WEAK_RATE_WARN {
         recs.push(DoctorRecommendation {
             id: "high_weak_evidence".to_string(),
             priority: "medium".to_string(),
-            message: "Prefer larger coherent commits over many single-file micro-commits.".to_string(),
-            expected_impact: "Fewer features with limited history".to_string(),
+            message: "Group related file changes into one commit rather than many tiny ones.".to_string(),
+            expected_impact: "Fewer features that need more context".to_string(),
         });
     }
 
@@ -1430,21 +1606,23 @@ fn build_doctor_recommendations(
         recs.push(DoctorRecommendation {
             id: "fragmentation".to_string(),
             priority: "medium".to_string(),
-            message: "Group related changes into a single commit and reference the feature or ticket.".to_string(),
+            message: "Group related changes into a single commit and mention what you were working on.".to_string(),
             expected_impact: "Larger, more readable features".to_string(),
         });
     }
 
-    // Rule E: Over-merge risk
+    // Rule E: Over-merge (skip for personal/hackathon — irrelevant at that scale)
     if run.avg_events_per_feature > DOCTOR_OVER_MERGE_THRESHOLD {
         recs.push(DoctorRecommendation {
             id: "over_merge_risk".to_string(),
             priority: "low".to_string(),
-            message: "Split broad branches by feature intent; use a distinct ticket or PR per feature.".to_string(),
+            message: "Split broad branches by feature intent; use a distinct reference per feature.".to_string(),
             expected_impact: "Clearer feature boundaries".to_string(),
         });
     }
 
+    // Filter out recommendations that don't apply to this project type
+    recs.retain(|r| repo_kind.filter_recommendation(&r.id));
     recs
 }
 
@@ -1476,7 +1654,12 @@ fn build_doctor_issues(run: &event_store::FeatureRun, weak_count: i64) -> Vec<St
     issues
 }
 
-fn build_doctor_report(run: &event_store::FeatureRun, features: &[Feature], security: SecurityReport) -> DoctorReport {
+fn build_doctor_report(
+    run: &event_store::FeatureRun,
+    features: &[Feature],
+    security: SecurityReport,
+    repo_kind: RepoKind,
+) -> DoctorReport {
     let weak_count = count_weak_features(features);
     let weak_rate = if run.feature_count > 0 {
         weak_count as f64 / run.feature_count as f64
@@ -1485,14 +1668,16 @@ fn build_doctor_report(run: &event_store::FeatureRun, features: &[Feature], secu
     };
     let score = compute_doctor_score(run, weak_rate);
     let band = classify_health_band(score);
-    let recommendations = build_doctor_recommendations(run, weak_rate);
+    let recommendations = build_doctor_recommendations(run, weak_rate, &repo_kind);
     let issues = build_doctor_issues(run, weak_count);
+    let repo_kind_label = repo_kind.label().to_string();
 
     DoctorReport {
         run_id: run.id.to_string(),
         ruleset_version: DOCTOR_RULESET_VERSION.to_string(),
         status: run.status.clone(),
         repository_health: band.to_string(),
+        repo_kind: repo_kind_label,
         security,
         metrics: DoctorMetrics {
             anchor_coverage: run.anchor_coverage,
@@ -1513,12 +1698,15 @@ fn build_doctor_report(run: &event_store::FeatureRun, features: &[Feature], secu
     }
 }
 
-fn render_doctor_text(report: &DoctorReport) -> String {
+fn render_doctor_text(report: &DoctorReport, repo_kind: &RepoKind) -> String {
     let mut out = String::new();
     let sep = "─".repeat(48);
     let security_leads = matches!(report.security.risk_level.as_str(), "Critical" | "High");
+    let identified = report.metrics.anchored_feature_count;
+    let unknown    = report.metrics.unanchored_feature_count;
+    let total      = report.metrics.feature_count;
 
-    // ── If real credentials/secrets detected, lead with that ──────────────
+    // ── Security Alert — lead when credentials actually found ─────────────
     if security_leads {
         out.push_str("Security Alert\n");
         out.push_str(&format!("{sep}\n\n"));
@@ -1528,69 +1716,54 @@ fn render_doctor_text(report: &DoctorReport) -> String {
         out.push('\n');
         let status = match report.security.risk_level.as_str() {
             "Critical" => "Secrets Exposed — act before pushing to a shared repository.",
-            "High" => "Credentials detected — review and remove before sharing.",
-            _ => &report.security.risk_level,
+            _ => "Credentials detected — review and remove before sharing.",
         };
-        out.push_str(&format!("  Status: {status}\n\n"));
+        out.push_str(&format!("  {status}\n\n"));
         out.push_str(&format!("{sep}\n\n"));
     }
 
-    // ── Project Memory ────────────────────────────────────────────────────
-    let total_commits = report.metrics.feature_count * report.metrics.avg_events_per_feature as i64;
-    let identified = report.metrics.anchored_feature_count;
-    let unknown = report.metrics.unanchored_feature_count;
-
-    out.push_str("Project Memory\n");
+    // ── Project Story header ──────────────────────────────────────────────
+    out.push_str(&format!("Project Story  ·  {}\n", repo_kind.label()));
     out.push_str(&format!("{sep}\n\n"));
-    out.push_str(&format!(
-        "Your project has {} commits across {} feature{}.\n\n",
-        total_commits,
-        report.metrics.feature_count,
-        if report.metrics.feature_count == 1 { "" } else { "s" }
-    ));
+    out.push_str(&format!("  {}\n\n", repo_kind.opening_line(identified, total)));
+
     if identified > 0 {
         out.push_str(&format!(
-            "  ✓  {} feature{} clearly identified\n",
+            "  ✓  {} feature{} readable\n",
             identified,
             if identified == 1 { " is" } else { "s are" }
         ));
     }
     if unknown > 0 {
         out.push_str(&format!(
-            "  ⚠  {} feature{} with limited or unknown history\n",
+            "  ⚠  {} feature{} need more context\n",
             unknown,
-            if unknown == 1 { " has" } else { "s have" }
+            if unknown == 1 { " needs" } else { "s need" }
         ));
     } else {
-        out.push_str("  ✓  All features have clear commit history\n");
+        out.push_str("  ✓  All features are readable\n");
     }
     out.push('\n');
-    out.push_str(&format!("Repository Health:  {}\n\n", report.repository_health));
+    out.push_str(&format!("  Project Story:  {}\n\n", report.repository_health));
     out.push_str(&format!("{sep}\n\n"));
 
-    // ── What We Found (only when there are issues) ─────────────────────
+    // ── Context note (repo-kind-specific gentle framing) ─────────────────
+    if let Some(note) = repo_kind.context_note() {
+        out.push_str(&format!("  {note}\n\n"));
+        out.push_str(&format!("{sep}\n\n"));
+    }
+
+    // ── What Evolith Sees (only when there are issues) ───────────────────
     if !report.issues.is_empty() {
-        out.push_str("What We Found\n\n");
+        out.push_str("What Evolith Sees\n\n");
         for issue in &report.issues {
             out.push_str(&format!("  ⚠  {}\n", issue));
-        }
-        out.push('\n');
-
-        out.push_str("Why It Matters\n\n");
-        if unknown > 0 {
-            out.push_str(&format!(
-                "  {} of your features lack clear commit references. This makes them\n  \
-                 hard to trace later — and confusing for new contributors.\n",
-                unknown
-            ));
-        } else {
-            out.push_str("  Some areas of your commit history could be clearer.\n");
         }
         out.push('\n');
         out.push_str(&format!("{sep}\n\n"));
     }
 
-    // ── Security Notes — always shown, but tone-matched to severity ──────
+    // ── Security Notes — always shown when no alert ───────────────────────
     if !security_leads {
         out.push_str("Security Notes\n\n");
         if report.security.findings.is_empty() {
@@ -1604,10 +1777,10 @@ fn render_doctor_text(report: &DoctorReport) -> String {
         out.push_str(&format!("{sep}\n\n"));
     }
 
-    // ── What To Do + Expected Result ────────────────────────────────────
+    // ── What Would Help / What To Do ─────────────────────────────────────
     let all_recs_count = report.security.recommendations.len() + report.recommendations.len();
     if all_recs_count > 0 {
-        out.push_str("What To Do\n\n");
+        out.push_str(&format!("{}\n\n", repo_kind.action_header()));
         let mut idx = 1usize;
         for rec in &report.security.recommendations {
             out.push_str(&format!("  {idx}. {}\n", rec));
@@ -1619,32 +1792,31 @@ fn render_doctor_text(report: &DoctorReport) -> String {
         }
         out.push('\n');
 
-        let has_anchor_rule = report.recommendations.iter().any(|r| r.id.contains("anchor_coverage"));
-        let has_frag_rule = report.recommendations.iter().any(|r| r.id == "fragmentation");
-        let has_identity_rule = report.recommendations.iter().any(|r| r.id.contains("identity_consistency"));
-        let has_security_recs = !report.security.recommendations.is_empty();
+        let has_anchor_rule    = report.recommendations.iter().any(|r| r.id.contains("anchor_coverage"));
+        let has_frag_rule      = report.recommendations.iter().any(|r| r.id == "fragmentation");
+        let has_identity_rule  = report.recommendations.iter().any(|r| r.id.contains("identity_consistency"));
+        let has_security_recs  = !report.security.recommendations.is_empty();
 
         if has_security_recs || has_anchor_rule || has_identity_rule || has_frag_rule {
             out.push_str("Expected Result\n\n");
             let msg = if has_security_recs && has_anchor_rule {
-                "  Reduced credential risk and a clearer, more complete project history."
+                "  Reduced credential risk and more of your project's story becomes readable."
             } else if has_security_recs {
                 "  Reduced risk of credential exposure and a safer repository."
             } else if has_anchor_rule && has_identity_rule {
-                "  More features clearly identified, fewer unknown areas, and a stronger project memory."
+                "  Evolith will be able to read more of your history, and features will be easier to trace."
             } else if has_anchor_rule {
-                "  More features clearly identified and a more complete project story."
+                "  More features become readable and your project story becomes more complete."
             } else if has_frag_rule {
-                "  Larger, more readable features with clearer commit boundaries."
+                "  Larger, more readable features with clearer boundaries."
             } else {
-                "  More consistent feature identity and improved project history accuracy."
+                "  More consistent features and a cleaner project story."
             };
             out.push_str(&format!("{msg}\n\n"));
         }
-
         out.push_str(&format!("{sep}\n\n"));
     } else {
-        out.push_str("Your commit practices are solid. No changes recommended.\n\n");
+        out.push_str("Evolith can already read this project well. No changes needed.\n\n");
         out.push_str(&format!("{sep}\n\n"));
     }
 
@@ -1660,11 +1832,11 @@ fn render_doctor_text(report: &DoctorReport) -> String {
         report.metrics.dominant_anchor_ratio
     ));
     out.push_str(&format!(
-        "  Identified Features:    {}\n",
+        "  Readable Features:      {}\n",
         report.metrics.anchored_feature_count
     ));
     out.push_str(&format!(
-        "  Unknown Features:       {}\n",
+        "  Need More Context:      {}\n",
         report.metrics.unanchored_feature_count
     ));
     out.push_str(&format!(
@@ -1672,15 +1844,15 @@ fn render_doctor_text(report: &DoctorReport) -> String {
         report.metrics.avg_events_per_feature
     ));
 
-    let has_anchor_rule = report.recommendations.iter().any(|r| r.id.contains("anchor_coverage"));
+    let has_anchor_rule   = report.recommendations.iter().any(|r| r.id.contains("anchor_coverage"));
     let has_identity_rule = report.recommendations.iter().any(|r| r.id.contains("identity_consistency"));
     if has_anchor_rule {
         let range = if report.metrics.anchor_coverage < DOCTOR_ANCHOR_COV_LOW { "15–25%" } else { "8–15%" };
-        out.push_str(&format!("  Expected Identity Coverage Gain:  {range}\n"));
+        out.push_str(&format!("  Expected Coverage Gain:         {range}\n"));
     }
     if has_identity_rule {
         let range = if report.metrics.dominant_anchor_ratio < DOCTOR_DOM_RATIO_POOR { "0.10–0.25" } else { "0.05–0.15" };
-        out.push_str(&format!("  Expected Consistency Gain:        {range}\n"));
+        out.push_str(&format!("  Expected Consistency Gain:      {range}\n"));
     }
 
     out
@@ -2471,7 +2643,7 @@ mod tests {
         let events = vec![make_event(0, "src/aiml.ts", "feature/aiml-engine", None, None)];
         let evidence_strength = estimate_evidence_strength(&feature, &events);
         let health = classify_feature_health(&feature, 0.85, &evidence_strength);
-        assert_eq!(health, "Limited History");
+        assert_eq!(health, "Needs More Context");
     }
 
     // --- evolith doctor tests ---
@@ -2524,8 +2696,8 @@ mod tests {
         // Bravely M2.2-like: high coverage, strong identity, healthy avg
         let run = make_run(0.75, 0.85, 9, 8, 1, 8.5);
         let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(8)).collect();
-        let report = build_doctor_report(&run, &features, SecurityReport::empty());
-        assert_eq!(report.repository_health, "Great Shape");
+        let report = build_doctor_report(&run, &features, SecurityReport::empty(), RepoKind::Unknown);
+        assert_eq!(report.repository_health, "Clear");
         assert!(report.scoring.overall_score >= 0.75);
         assert!(report.recommendations.is_empty());
     }
@@ -2535,10 +2707,10 @@ mod tests {
         // TRX-AI-like: low anchor coverage, moderate identity
         let run = make_run(0.228, 0.56, 9, 5, 4, 6.33);
         let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(4)).collect();
-        let report = build_doctor_report(&run, &features, SecurityReport::empty());
+        let report = build_doctor_report(&run, &features, SecurityReport::empty(), RepoKind::Unknown);
         assert!(
-            report.repository_health == "Room to Improve" || report.repository_health == "Needs Attention",
-            "expected Room to Improve or Needs Attention, got {}",
+            report.repository_health == "Forming" || report.repository_health == "Thin",
+            "expected Forming or Thin, got {}",
             report.repository_health
         );
         assert!(!report.recommendations.is_empty());
@@ -2548,7 +2720,7 @@ mod tests {
     fn doctor_fragmentation_rule_triggers_when_avg_below_threshold() {
         let run = make_run(0.50, 0.70, 10, 8, 2, 1.5); // avg_events < 2.0
         let features: Vec<Feature> = (0..10).map(|_| make_feature_with_commits(1)).collect();
-        let report = build_doctor_report(&run, &features, SecurityReport::empty());
+        let report = build_doctor_report(&run, &features, SecurityReport::empty(), RepoKind::Unknown);
         let has_frag = report.recommendations.iter().any(|r| r.id == "fragmentation");
         assert!(has_frag, "fragmentation rule should trigger when avg_events_per_feature < 2.0");
     }
@@ -2557,7 +2729,7 @@ mod tests {
     fn doctor_no_fragmentation_when_avg_is_healthy() {
         let run = make_run(0.60, 0.75, 8, 7, 1, 10.0);
         let features: Vec<Feature> = (0..8).map(|_| make_feature_with_commits(8)).collect();
-        let report = build_doctor_report(&run, &features, SecurityReport::empty());
+        let report = build_doctor_report(&run, &features, SecurityReport::empty(), RepoKind::Unknown);
         let has_frag = report.recommendations.iter().any(|r| r.id == "fragmentation");
         assert!(!has_frag, "fragmentation rule should not trigger for healthy avg_events_per_feature");
     }
@@ -2566,7 +2738,7 @@ mod tests {
     fn doctor_json_report_has_required_fields() {
         let run = make_run(0.228, 0.56, 9, 5, 4, 6.33);
         let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(4)).collect();
-        let report = build_doctor_report(&run, &features, SecurityReport::empty());
+        let report = build_doctor_report(&run, &features, SecurityReport::empty(), RepoKind::Unknown);
         let json = serde_json::to_value(&report).unwrap();
         assert!(json.get("run_id").is_some());
         assert!(json.get("repository_health").is_some());
@@ -2584,12 +2756,12 @@ mod tests {
     fn doctor_text_output_leads_with_repository_summary() {
         let run = make_run(0.228, 0.56, 9, 5, 4, 6.33);
         let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(4)).collect();
-        let report = build_doctor_report(&run, &features, SecurityReport::empty());
-        let text = render_doctor_text(&report);
-        assert!(text.starts_with("Project Memory"), "text output must start with Project Memory");
-        let health_pos = text.find("Repository Health:").unwrap();
-        let summary_pos = text.find("Project Memory").unwrap();
-        assert!(summary_pos < health_pos, "summary must appear before health score");
+        let report = build_doctor_report(&run, &features, SecurityReport::empty(), RepoKind::Unknown);
+        let text = render_doctor_text(&report, &RepoKind::Unknown);
+        assert!(text.starts_with("Project Story"), "text output must start with Project Story");
+        let health_pos = text.find("Project Story:").unwrap_or(usize::MAX);
+        let summary_pos = text.find("Project Story  ·").unwrap();
+        assert!(summary_pos < health_pos, "header must appear before health score line");
         assert!(!text.contains("anchor_coverage"), "raw metric keys must not appear in text output");
         assert!(!text.contains("dominant_anchor_ratio"), "raw metric keys must not appear in text output");
     }
@@ -2598,8 +2770,8 @@ mod tests {
     fn doctor_text_output_contains_details_section() {
         let run = make_run(0.50, 0.70, 9, 7, 2, 6.0);
         let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(6)).collect();
-        let report = build_doctor_report(&run, &features, SecurityReport::empty());
-        let text = render_doctor_text(&report);
+        let report = build_doctor_report(&run, &features, SecurityReport::empty(), RepoKind::Unknown);
+        let text = render_doctor_text(&report, &RepoKind::Unknown);
         assert!(text.contains("Details\n"), "text output must contain Details section");
         assert!(text.contains("Identity Coverage:"), "Details must include Identity Coverage");
         assert!(text.contains("Feature Consistency:"), "Details must include Feature Consistency");
@@ -2609,7 +2781,7 @@ mod tests {
     fn doctor_over_merge_rule_triggers() {
         let run = make_run(0.80, 0.85, 3, 3, 0, 30.0); // avg_events > 25.0
         let features: Vec<Feature> = (0..3).map(|_| make_feature_with_commits(30)).collect();
-        let report = build_doctor_report(&run, &features, SecurityReport::empty());
+        let report = build_doctor_report(&run, &features, SecurityReport::empty(), RepoKind::Unknown);
         let has_over_merge = report.recommendations.iter().any(|r| r.id == "over_merge_risk");
         assert!(has_over_merge, "over-merge rule should trigger when avg_events_per_feature > 25.0");
     }
@@ -2618,8 +2790,8 @@ mod tests {
     fn doctor_recommendations_are_deterministic() {
         let run = make_run(0.228, 0.56, 9, 5, 4, 6.33);
         let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(4)).collect();
-        let report1 = build_doctor_report(&run, &features, SecurityReport::empty());
-        let report2 = build_doctor_report(&run, &features, SecurityReport::empty());
+        let report1 = build_doctor_report(&run, &features, SecurityReport::empty(), RepoKind::Unknown);
+        let report2 = build_doctor_report(&run, &features, SecurityReport::empty(), RepoKind::Unknown);
         let ids1: Vec<&str> = report1.recommendations.iter().map(|r| r.id.as_str()).collect();
         let ids2: Vec<&str> = report2.recommendations.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids1, ids2, "recommendations must be deterministic across repeated calls");
@@ -2774,8 +2946,8 @@ mod tests {
     fn doctor_text_always_contains_security_section() {
         let run = make_run(0.75, 0.85, 9, 8, 1, 8.5);
         let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(8)).collect();
-        let report = build_doctor_report(&run, &features, SecurityReport::empty());
-        let text = render_doctor_text(&report);
+        let report = build_doctor_report(&run, &features, SecurityReport::empty(), RepoKind::Unknown);
+        let text = render_doctor_text(&report, &RepoKind::Unknown);
         assert!(text.contains("Security Notes"), "doctor text must include Security Notes section");
         assert!(text.contains("✓  No credentials or secrets detected."), "clean repo should show no issues");
     }
@@ -2795,13 +2967,13 @@ mod tests {
             recommendations: vec!["Remove .env.production from git tracking.".to_string()],
             scanned_file_count: 10,
         };
-        let report = build_doctor_report(&run, &features, sec);
-        let text = render_doctor_text(&report);
+        let report = build_doctor_report(&run, &features, sec, RepoKind::Unknown);
+        let text = render_doctor_text(&report, &RepoKind::Unknown);
         assert!(text.contains("Needs Attention") || text.contains("Secrets Exposed"), "should show attention status when findings exist");
         assert!(text.contains(".env.production is tracked by git"), "should show finding message");
         // Security alert leads when High/Critical, health appears after
         let sec_pos = text.find("Security Alert").unwrap();
-        let health_pos = text.find("Repository Health:").unwrap();
-        assert!(sec_pos < health_pos, "security alert should appear before health section when severity is high");
+        let story_pos = text.find("Project Story  ·").unwrap();
+        assert!(sec_pos < story_pos, "security alert should appear before project story section when severity is high");
     }
 }
