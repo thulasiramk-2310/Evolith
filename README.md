@@ -73,7 +73,7 @@ Your team has 63 commits across 21 features. Evolith can clearly read 14 of them
   ✓  14 features are clearly identified
   ⚠  7 features have limited or unknown history
 
-Project Story:  Forming
+Project Story:  Partially Understood
 
 ────────────────────────────────────────────────
 

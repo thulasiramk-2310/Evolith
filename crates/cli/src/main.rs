@@ -1404,18 +1404,18 @@ fn classify_feature_health(feature: &Feature, anchor_confidence: f64, evidence_s
 
 fn classify_run_health(run: &event_store::FeatureRun) -> &'static str {
     if run.status != "completed" {
-        return "Thin";
+        return "Needs More History";
     }
     if run.anchored_feature_count > run.unanchored_feature_count
         && run.anchor_coverage >= 0.30
         && run.dominant_anchor_ratio >= 0.60
     {
-        return "Clear";
+        return "Well Understood";
     }
     if run.anchor_coverage >= 0.20 && run.dominant_anchor_ratio >= 0.50 {
-        return "Forming";
+        return "Partially Understood";
     }
-    "Thin"
+    "Needs More History"
 }
 
 fn build_run_observations(run: &event_store::FeatureRun) -> Vec<String> {
@@ -1507,11 +1507,11 @@ fn compute_doctor_score(run: &event_store::FeatureRun, weak_rate: f64) -> f64 {
 
 fn classify_health_band(score: f64) -> &'static str {
     if score >= 0.75 {
-        "Clear"
+        "Well Understood"
     } else if score >= 0.50 {
-        "Forming"
+        "Partially Understood"
     } else {
-        "Thin"
+        "Needs More History"
     }
 }
 
@@ -2703,7 +2703,7 @@ mod tests {
         let run = make_run(0.75, 0.85, 9, 8, 1, 8.5);
         let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(8)).collect();
         let report = build_doctor_report(&run, &features, SecurityReport::empty(), RepoKind::Unknown);
-        assert_eq!(report.repository_health, "Clear");
+        assert_eq!(report.repository_health, "Well Understood");
         assert!(report.scoring.overall_score >= 0.75);
         assert!(report.recommendations.is_empty());
     }
@@ -2715,8 +2715,8 @@ mod tests {
         let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(4)).collect();
         let report = build_doctor_report(&run, &features, SecurityReport::empty(), RepoKind::Unknown);
         assert!(
-            report.repository_health == "Forming" || report.repository_health == "Thin",
-            "expected Forming or Thin, got {}",
+            report.repository_health == "Partially Understood" || report.repository_health == "Needs More History",
+            "expected Partially Understood or Needs More History, got {}",
             report.repository_health
         );
         assert!(!report.recommendations.is_empty());
