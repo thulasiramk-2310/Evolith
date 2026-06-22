@@ -11,7 +11,7 @@ InstallModes:
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/thulasiramk-2310/Evolith/releases/download/v0.1.0/evolith-windows-x64.zip
-    InstallerSha256: REPLACE_WITH_SHA256
+    InstallerSha256: 6F5C1A40B8281EB8D2DE9F0968B7B79F57337B1A8DD9573C0B0AF1C38482E46D
     NestedInstallerType: portable
     NestedInstallerFiles:
       - RelativeFilePath: evolith.exe
