@@ -7,7 +7,6 @@ use serde::Serialize;
 use session_engine::SessionEngine;
 use replay_engine::ReplayEngine;
 use std::collections::HashMap;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -100,26 +99,18 @@ const DOCTOR_WEAK_RATE_POOR: f64 = 0.40;
 const DOCTOR_WEAK_RATE_WARN: f64 = 0.30;
 
 fn get_db_path() -> PathBuf {
-    let preferred = Path::new(".evolith");
     let legacy = Path::new(".devreplay");
-    if preferred.exists() || !legacy.exists() {
-        return preferred.join("events.db");
+    if legacy.exists() && !Path::new(".evolith").exists() {
+        if let Err(e) = fs::rename(legacy, ".evolith") {
+            eprintln!("Warning: could not migrate .devreplay to .evolith: {e}");
+        } else {
+            println!("Migrated legacy DevReplay data to Evolith.");
+        }
     }
-    legacy.join("events.db")
+    Path::new(".evolith").join("events.db")
 }
 
 fn main() -> Result<()> {
-    if let Some(invoked_as) = env::args().next() {
-        let invoked_name = Path::new(&invoked_as)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_lowercase();
-        if invoked_name == "devreplay" {
-            eprintln!("Warning: `devreplay` is deprecated; use `evolith`.");
-        }
-    }
-
     let cli = Cli::parse();
 
     match &cli.command {
@@ -153,20 +144,18 @@ fn main() -> Result<()> {
                 let store = EventStore::new(&db_path)?;
                 let runs = store.list_feature_runs()?;
                 if runs.is_empty() {
-                    println!("No feature runs found.");
+                    println!("No analysis runs yet. Run `evolith features rebuild` to analyze your project.");
                 } else {
                     for run in runs {
+                        let health = classify_run_health(&run);
                         println!(
-                            "{} {} status={} features={} anchor_coverage={:.1}% anchored={} unanchored={} avg_events_per_feature={:.2} dominant_anchor_ratio={:.2}",
-                            run.started_at.format("%Y-%m-%d %H:%M:%S"),
-                            run.algorithm_version,
-                            run.status,
+                            "  {}  {} feature{}  ·  {} identified  ·  {} unknown  ·  {}",
+                            run.started_at.format("%Y-%m-%d %H:%M"),
                             run.feature_count,
-                            run.anchor_coverage * 100.0,
+                            if run.feature_count == 1 { "" } else { "s" },
                             run.anchored_feature_count,
                             run.unanchored_feature_count,
-                            run.avg_events_per_feature,
-                            run.dominant_anchor_ratio
+                            health,
                         );
                     }
                 }
@@ -191,43 +180,29 @@ fn main() -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&report)?);
                         return Ok(());
                     }
-                    println!("Run {}", run.id);
+                    println!("Analysis  ·  {}", run.started_at.format("%Y-%m-%d %H:%M"));
                     println!();
-                    println!("Algorithm:");
-                    println!("{}", run.algorithm_version);
+                    println!("Repository Health:  {}", run_health);
                     println!();
-                    println!("Status:");
-                    println!("{}", run.status);
-                    println!();
-                    println!("Window:");
-                    println!(
-                        "{} -> {}",
-                        run.started_at.format("%Y-%m-%d %H:%M:%S"),
-                        run.completed_at
-                            .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
-                            .unwrap_or_else(|| "in-progress".to_string())
-                    );
-                    println!();
-                    println!("Metrics:");
-                    println!("Events: {}", run.event_count);
-                    println!("Features: {}", run.feature_count);
-                    println!("Anchor Coverage: {:.1}%", run.anchor_coverage * 100.0);
-                    println!("Anchored Features: {}", run.anchored_feature_count);
-                    println!("Unanchored Features: {}", run.unanchored_feature_count);
-                    println!("Avg Events/Feature: {:.2}", run.avg_events_per_feature);
-                    println!("Dominant Anchor Ratio: {:.2}", run.dominant_anchor_ratio);
-                    println!();
-                    println!("Health:");
-                    println!("{}", run_health);
-                    println!();
-                    println!("Observations:");
-                    for line in observations {
-                        println!("- {}", line);
+                    for obs in &observations {
+                        println!("  ✓  {}", obs);
                     }
+                    println!();
+                    println!("{}", "─".repeat(48));
+                    println!();
+                    println!("Details");
+                    println!();
+                    println!("  Events collected:      {}", run.event_count);
+                    println!("  Features found:        {}", run.feature_count);
+                    println!("  Identity Coverage:     {:.1}%", run.anchor_coverage * 100.0);
+                    println!("  Identified features:   {}", run.anchored_feature_count);
+                    println!("  Unknown features:      {}", run.unanchored_feature_count);
+                    println!("  Avg commits / feature: {:.2}", run.avg_events_per_feature);
+                    println!("  Feature Consistency:   {:.2}", run.dominant_anchor_ratio);
                 } else if *json {
-                    println!("{}", serde_json::json!({"error":"feature run not found"}));
+                    println!("{}", serde_json::json!({"error":"analysis run not found"}));
                 } else {
-                    println!("Feature run not found.");
+                    println!("Analysis run not found.");
                 }
             }
         },
@@ -435,7 +410,12 @@ fn main() -> Result<()> {
 
                 match rebuild_result {
                     Ok(feature_count) => {
-                        println!("Rebuilt {} features using {}.", feature_count, FEATURE_ALGO_VERSION);
+                        println!(
+                            "Done. Found {} feature{} in your project history.",
+                            feature_count,
+                            if feature_count == 1 { "" } else { "s" }
+                        );
+                        println!("Run `evolith features list` to see them.");
                     }
                     Err(err) => {
                         let _ = store.fail_feature_run(run_id);
@@ -448,13 +428,13 @@ fn main() -> Result<()> {
                 let store = EventStore::new(&db_path)?;
                 let features = store.list_features()?;
                 if features.is_empty() {
-                    println!("No features found. Run `evolith features rebuild` first.");
+                    println!("No features found yet. Run `evolith features rebuild` to analyze your project history.");
                 } else {
+                    println!("Your project has {} identified feature{}.\n", features.len(), if features.len() == 1 { "" } else { "s" });
                     for (i, feature) in features.iter().enumerate() {
                         println!(
-                            "{} {} {} [{}]",
-                            i,
-                            feature.id,
+                            "  {:>2}.  {}  [{}]",
+                            i + 1,
                             feature.title,
                             feature.status
                         );
@@ -474,22 +454,24 @@ fn main() -> Result<()> {
                     let anchor_confidence = estimate_anchor_confidence(&feature);
                     let evidence_strength = estimate_evidence_strength(&feature, &events);
                     let feature_health = classify_feature_health(&feature, anchor_confidence, &evidence_strength);
-                    println!("Anchor Confidence: {:.2}", anchor_confidence);
-                    println!(
-                        "Evidence Strength: {} ({:.2})",
-                        evidence_strength.label, evidence_strength.score
-                    );
-                    println!("Feature Health: {}", feature_health);
-                    println!("Evidence: {}", feature.evidence_json);
+                    let clarity_label = if anchor_confidence >= 0.75 { "Strong" } else if anchor_confidence >= 0.50 { "Moderate" } else { "Low" };
+                    println!("{}", feature.title);
+                    println!("{}", "─".repeat(50));
+                    println!();
+                    println!("  Status:            {}", feature.status);
+                    println!("  Feature Health:    {}", feature_health);
+                    println!("  Identity Clarity:  {}", clarity_label);
+                    println!("  History Strength:  {}", evidence_strength.label);
+                    println!("  Events:            {}", events.len());
                     if let (Some(first), Some(last)) = (events.first(), events.last()) {
                         println!(
-                            "Window: {} -> {}",
-                            first.timestamp.format("%Y-%m-%d %H:%M:%S"),
-                            last.timestamp.format("%Y-%m-%d %H:%M:%S")
+                            "  Work period:       {} → {}",
+                            first.timestamp.format("%Y-%m-%d"),
+                            last.timestamp.format("%Y-%m-%d")
                         );
                     }
                 } else {
-                    println!("Feature not found.");
+                    println!("Feature not found. Try `evolith features list` to see all features.");
                 }
             }
             FeatureCommands::Explain { id, json } => {
@@ -522,7 +504,7 @@ fn main() -> Result<()> {
                 } else if *json {
                     println!("{}", serde_json::json!({"error":"feature not found"}));
                 } else {
-                    println!("Feature not found.");
+                    println!("Feature not found. Try `evolith features list` to see all features.");
                 }
             }
         },
@@ -545,8 +527,8 @@ fn main() -> Result<()> {
                     if *json {
                         println!("{}", serde_json::json!({"error": "no completed feature run found; run `evolith features rebuild` first"}));
                     } else {
-                        println!("No completed feature run found.");
-                        println!("Run `evolith features rebuild` first.");
+                        println!("No analysis complete yet.");
+                        println!("Run `evolith features rebuild` first to analyze your project.");
                     }
                     return Ok(());
                 }
@@ -1035,51 +1017,120 @@ fn build_feature_explanation(
         })
         .unwrap_or_default();
 
-    let mut evidence_lines: Vec<String> = Vec::new();
-    evidence_lines.push(format!("- {} events", events.len()));
-    evidence_lines.push(format!("- {} commits", commit_count));
-    evidence_lines.push(format!("- {} episodes", episode_count));
+    // What happened?
+    let mut what_parts: Vec<String> = Vec::new();
+    what_parts.push(format!(
+        "{} commit{}",
+        commit_count,
+        if commit_count == 1 { "" } else { "s" }
+    ));
+    what_parts.push(format!(
+        "{} file change{}",
+        events.len(),
+        if events.len() == 1 { "" } else { "s" }
+    ));
     if !ticket_ids.is_empty() {
-        evidence_lines.push(format!("- Ticket anchors: {}", ticket_ids.join(", ")));
-    }
-    if !pr_ids.is_empty() {
-        evidence_lines.push(format!("- PR anchors: {}", pr_ids.join(", ")));
+        what_parts.push(format!("linked to {}", ticket_ids.join(", ")));
     }
     if !branches.is_empty() {
-        evidence_lines.push(format!("- Branches: {}", branches.join(", ")));
+        what_parts.push(format!("on {}", branches[0]));
     }
+    let what_happened = what_parts.join("  ·  ");
 
-    let rationale = if dominant_anchor_ratio >= 0.75 {
-        format!(
-            "Strong anchor agreement: {:.0}% of events align to a dominant anchor.",
-            dominant_anchor_ratio * 100.0
-        )
-    } else if dominant_anchor_ratio >= 0.50 {
-        format!(
-            "Moderate anchor agreement: {:.0}% of events align to a dominant anchor.",
-            dominant_anchor_ratio * 100.0
-        )
-    } else {
-        format!(
-            "Low anchor agreement: {:.0}% of events align to a dominant anchor; grouping relies more on fallback heuristics.",
-            dominant_anchor_ratio * 100.0
-        )
+    // Why it matters
+    let why_matters = match feature_health {
+        "Well Defined" => format!(
+            "This feature is clearly identified — {pct:.0}% of its commits point to the same \
+             feature. Evolith can reliably trace this back through your history.",
+            pct = dominant_anchor_ratio * 100.0
+        ),
+        "Limited History" => {
+            "This feature has very few commits. Its history is too thin to reconstruct \
+             reliably — not enough signal to be confident about what belongs here."
+                .to_string()
+        }
+        "Mixed Signals" => {
+            "Commits in this feature point in different directions. It may contain \
+             unrelated changes bundled together, making it hard to understand as a unit."
+                .to_string()
+        }
+        "Scattered Commits" => format!(
+            "Only {pct:.0}% of commits agree on what this feature is. The history exists, \
+             but it's fragmented — future readers (or your future self) will find it confusing.",
+            pct = dominant_anchor_ratio * 100.0
+        ),
+        _ => "Feature identity could not be reliably determined.".to_string(),
     };
 
-    format!(
-        "Feature: {}\n\nFeature Health: {}\nAnchor Confidence: {:.2}\nEvidence Strength: {} ({:.2})\n\nEvidence:\n{}\n\nWhy grouped:\n{}\n{}",
-        feature.title,
-        feature_health,
-        anchor_confidence,
-        evidence_strength.label,
-        evidence_strength.score,
-        evidence_lines.join("\n"),
-        rationale,
-        if evidence_strength.label == "Weak" {
-            "Limited evidence available."
-        } else {
-            "Evidence volume supports this grouping."
+    // What to do
+    let what_to_do = match feature_health {
+        "Well Defined" => {
+            "Nothing — this feature is in good shape. Keep referencing \
+             tickets and PRs in your commits to maintain this clarity."
         }
+        "Limited History" => {
+            "Add more commits that reference this feature's ticket or branch. \
+             Even a small follow-up commit improves your project memory."
+        }
+        "Mixed Signals" => {
+            "Review which commits actually belong here. Use a consistent ticket ID \
+             or branch name to keep related changes together."
+        }
+        "Scattered Commits" => {
+            "Use a stable ticket reference (e.g. AUTH-123) across all commits \
+             in this feature so Evolith can group them with confidence."
+        }
+        _ => "Review this feature manually to understand what it represents.",
+    };
+
+    // Expected result
+    let expected = match feature_health {
+        "Well Defined" => "Your project memory for this feature is reliable.",
+        "Limited History" => "More commits will make this feature clearly identifiable.",
+        "Mixed Signals" => "A consistent reference will make this feature readable at a glance.",
+        "Scattered Commits" => "Stable commit references will make this feature Well Defined.",
+        _ => "Feature history will become easier to read.",
+    };
+
+    // Identity links
+    let mut links: Vec<String> = Vec::new();
+    if !ticket_ids.is_empty() {
+        links.push(ticket_ids.join(", "));
+    }
+    if !pr_ids.is_empty() {
+        links.push(format!("PR {}", pr_ids.join(", ")));
+    }
+    if !branches.is_empty() {
+        links.push(branches.join(", "));
+    }
+    let linked_to = if links.is_empty() {
+        "none detected".to_string()
+    } else {
+        links.join("  ·  ")
+    };
+
+    let clarity_label = if anchor_confidence >= 0.75 {
+        "Strong"
+    } else if anchor_confidence >= 0.50 {
+        "Moderate"
+    } else {
+        "Low"
+    };
+
+    let sep = "─".repeat(50);
+    format!(
+        "{title}\n{sep}\n\nWhat happened?\n  {what}\n\nWhy it matters\n  {why}\n\nWhat to do\n  {todo}\n\nExpected result\n  {expected}\n\n{sep}\nIdentity Clarity:   {clarity}\nHistory Strength:   {strength}\nCommits:            {commits}\nWork sessions:      {episodes}\nLinked to:          {linked}\n",
+        title = feature.title,
+        sep = sep,
+        what = what_happened,
+        why = why_matters,
+        todo = what_to_do,
+        expected = expected,
+        clarity = clarity_label,
+        strength = evidence_strength.label,
+        commits = commit_count,
+        episodes = episode_count,
+        linked = linked_to
     )
 }
 
@@ -1185,57 +1236,57 @@ fn classify_feature_health(feature: &Feature, anchor_confidence: f64, evidence_s
     let is_episode_candidate = title_lower.contains("episode candidate");
 
     if is_episode_candidate && evidence_strength.label == "Weak" {
-        return "Weak Evidence";
+        return "Limited History";
     }
     if evidence_strength.label == "Weak" {
-        return "Weak Evidence";
+        return "Limited History";
     }
     if anchor_confidence < 0.50 && evidence_strength.score >= 0.40 {
-        return "Anchor Conflict";
+        return "Mixed Signals";
     }
     if anchor_confidence < 0.65 || evidence_strength.label == "Moderate" {
-        return "Fragmented";
+        return "Scattered Commits";
     }
-    "Healthy"
+    "Well Defined"
 }
 
 fn classify_run_health(run: &event_store::FeatureRun) -> &'static str {
     if run.status != "completed" {
-        return "Needs Attention";
+        return "Needs Review";
     }
     if run.anchored_feature_count > run.unanchored_feature_count
         && run.anchor_coverage >= 0.30
         && run.dominant_anchor_ratio >= 0.60
     {
-        return "Good";
+        return "Great Shape";
     }
     if run.anchor_coverage >= 0.20 && run.dominant_anchor_ratio >= 0.50 {
-        return "Moderate";
+        return "Room to Improve";
     }
-    "Needs Attention"
+    "Needs Review"
 }
 
 fn build_run_observations(run: &event_store::FeatureRun) -> Vec<String> {
     let mut notes = Vec::new();
     if run.anchored_feature_count > run.unanchored_feature_count {
-        notes.push("Anchored features exceed unanchored features.".to_string());
+        notes.push("Most features are clearly identified.".to_string());
     } else {
-        notes.push("Unanchored features are still significant.".to_string());
+        notes.push("More than half your features are unidentified — your history is hard to read.".to_string());
     }
     if run.dominant_anchor_ratio >= 0.60 {
-        notes.push("Dominant anchor ratio is above 0.60.".to_string());
+        notes.push("Commits are consistent within each feature — easy to trace what changed and why.".to_string());
     } else {
-        notes.push("Dominant anchor ratio is below 0.60; identity is weaker.".to_string());
+        notes.push("Commits are mixed across features — your project story is harder to follow.".to_string());
     }
     if run.anchor_coverage >= 0.30 {
-        notes.push("Anchor coverage is above 30%.".to_string());
+        notes.push("Enough commits reference tickets or PRs to reconstruct your project story.".to_string());
     } else {
-        notes.push("Anchor coverage is below 30%; extraction enrichment recommended.".to_string());
+        notes.push("Most commits lack ticket or PR references — your project story is incomplete.".to_string());
     }
     if run.avg_events_per_feature < 2.0 {
-        notes.push("High fragmentation risk: average events per feature is below 2.0.".to_string());
+        notes.push("Most features have very few commits — consider grouping related work together.".to_string());
     } else {
-        notes.push("Feature consolidation is reasonable based on average events per feature.".to_string());
+        notes.push("Features have a reasonable number of commits — project history looks coherent.".to_string());
     }
     notes
 }
@@ -1304,11 +1355,11 @@ fn compute_doctor_score(run: &event_store::FeatureRun, weak_rate: f64) -> f64 {
 
 fn classify_health_band(score: f64) -> &'static str {
     if score >= 0.75 {
-        "Good"
+        "Great Shape"
     } else if score >= 0.50 {
-        "Moderate"
+        "Room to Improve"
     } else {
-        "Poor"
+        "Needs Attention"
     }
 }
 
@@ -1324,26 +1375,26 @@ fn build_doctor_recommendations(
             id: "low_anchor_coverage_commit_anchors".to_string(),
             priority: "high".to_string(),
             message: "Include ticket IDs in commit messages (e.g. AUTH-123, PROJ-42).".to_string(),
-            expected_impact: "Anchor Coverage +15-25%".to_string(),
+            expected_impact: "Identity Coverage +15–25%".to_string(),
         });
         recs.push(DoctorRecommendation {
             id: "low_anchor_coverage_pr_refs".to_string(),
             priority: "high".to_string(),
             message: "Reference PR numbers in merge and commit messages (e.g. #123, PR-123).".to_string(),
-            expected_impact: "Anchor Coverage +15-25%".to_string(),
+            expected_impact: "Identity Coverage +15–25%".to_string(),
         });
     } else if run.anchor_coverage < DOCTOR_ANCHOR_COV_WARN {
         recs.push(DoctorRecommendation {
             id: "moderate_anchor_coverage_branch_naming".to_string(),
             priority: "medium".to_string(),
             message: "Use descriptive branch names tied to features or tickets.".to_string(),
-            expected_impact: "Anchor Coverage +8-15%".to_string(),
+            expected_impact: "Identity Coverage +8–15%".to_string(),
         });
         recs.push(DoctorRecommendation {
             id: "moderate_anchor_coverage_ticket_refs".to_string(),
             priority: "medium".to_string(),
             message: "Include ticket references in commit messages consistently.".to_string(),
-            expected_impact: "Anchor Coverage +8-15%".to_string(),
+            expected_impact: "Identity Coverage +8–15%".to_string(),
         });
     }
 
@@ -1353,14 +1404,14 @@ fn build_doctor_recommendations(
             id: "low_identity_consistency".to_string(),
             priority: "high".to_string(),
             message: "Avoid mixing unrelated changes on the same branch or commit.".to_string(),
-            expected_impact: "Identity Consistency +0.10-0.25".to_string(),
+            expected_impact: "Feature Consistency +0.10–0.25".to_string(),
         });
     } else if run.dominant_anchor_ratio < DOCTOR_DOM_RATIO_WARN {
         recs.push(DoctorRecommendation {
             id: "moderate_identity_consistency".to_string(),
             priority: "medium".to_string(),
-            message: "Use stable work-item references across commits in the same work stream.".to_string(),
-            expected_impact: "Identity Consistency +0.05-0.15".to_string(),
+            message: "Use stable work-item references across commits in the same feature.".to_string(),
+            expected_impact: "Feature Consistency +0.05–0.15".to_string(),
         });
     }
 
@@ -1370,7 +1421,7 @@ fn build_doctor_recommendations(
             id: "high_weak_evidence".to_string(),
             priority: "medium".to_string(),
             message: "Prefer larger coherent commits over many single-file micro-commits.".to_string(),
-            expected_impact: "Fewer unidentified work streams".to_string(),
+            expected_impact: "Fewer features with limited history".to_string(),
         });
     }
 
@@ -1379,8 +1430,8 @@ fn build_doctor_recommendations(
         recs.push(DoctorRecommendation {
             id: "fragmentation".to_string(),
             priority: "medium".to_string(),
-            message: "Reduce standalone micro-commits; group related changes and reference the work item.".to_string(),
-            expected_impact: "Larger, more coherent work stream groupings".to_string(),
+            message: "Group related changes into a single commit and reference the feature or ticket.".to_string(),
+            expected_impact: "Larger, more readable features".to_string(),
         });
     }
 
@@ -1389,8 +1440,8 @@ fn build_doctor_recommendations(
         recs.push(DoctorRecommendation {
             id: "over_merge_risk".to_string(),
             priority: "low".to_string(),
-            message: "Split broad branches by feature intent; use distinct ticket or PR anchors per stream.".to_string(),
-            expected_impact: "Clearer work stream boundaries".to_string(),
+            message: "Split broad branches by feature intent; use a distinct ticket or PR per feature.".to_string(),
+            expected_impact: "Clearer feature boundaries".to_string(),
         });
     }
 
@@ -1401,22 +1452,26 @@ fn build_doctor_issues(run: &event_store::FeatureRun, weak_count: i64) -> Vec<St
     let mut issues: Vec<String> = Vec::new();
     let uncovered_pct = (1.0 - run.anchor_coverage) * 100.0;
     if uncovered_pct > 50.0 {
-        issues.push(format!("{:.1}% of commits lack identifiable anchors.", uncovered_pct));
+        issues.push(format!("{:.0}% of your commits have no ticket, PR, or branch reference.", uncovered_pct));
     }
     if run.unanchored_feature_count > 0 {
         issues.push(format!(
-            "{} of {} work streams are ambiguous.",
+            "{} of {} features have unknown or ambiguous history.",
             run.unanchored_feature_count, run.feature_count
         ));
     }
     if weak_count > 0 {
-        issues.push(format!("{} work streams have very thin evidence.", weak_count));
+        issues.push(format!(
+            "{} feature{} have very few commits — too thin to reconstruct reliably.",
+            weak_count,
+            if weak_count == 1 { " has" } else { "s" }
+        ));
     }
     if run.avg_events_per_feature < DOCTOR_FRAG_THRESHOLD {
-        issues.push("High fragmentation: most work streams have fewer than 2 commits.".to_string());
+        issues.push("Most features have fewer than 2 commits — your history is fragmented.".to_string());
     }
     if run.avg_events_per_feature > DOCTOR_OVER_MERGE_THRESHOLD {
-        issues.push("Some work streams may contain too many unrelated commits.".to_string());
+        issues.push("Some features contain too many unrelated commits — they may need to be split.".to_string());
     }
     issues
 }
@@ -1460,140 +1515,172 @@ fn build_doctor_report(run: &event_store::FeatureRun, features: &[Feature], secu
 
 fn render_doctor_text(report: &DoctorReport) -> String {
     let mut out = String::new();
+    let sep = "─".repeat(48);
     let security_leads = matches!(report.security.risk_level.as_str(), "Critical" | "High");
 
+    // ── If real credentials/secrets detected, lead with that ──────────────
     if security_leads {
-        // When there's a Critical/High security issue, lead with it — the user needs to see the
-        // most urgent signal before their brain files the repo as "Moderate" and moves on.
         out.push_str("Security Alert\n");
-        out.push_str("==============\n\n");
+        out.push_str(&format!("{sep}\n\n"));
         for f in &report.security.findings {
-            out.push_str(&format!("{}  {}\n", severity_label(&f.severity), f.message));
+            out.push_str(&format!("  {}  {}\n", severity_label(&f.severity), f.message));
         }
         out.push('\n');
-        out.push_str(&format!("Risk: {}\n\n", report.security.risk_level));
-
-        // Health and project context follow
-        out.push_str(&format!("Repository Health: {}\n\n", report.repository_health));
-        out.push_str(&format!(
-            "Your project contains {} commits grouped into {} work streams.\n",
-            report.metrics.feature_count * report.metrics.avg_events_per_feature as i64,
-            report.metrics.feature_count,
-        ));
-        if report.metrics.unanchored_feature_count > 0 {
-            out.push_str(&format!(
-                "{} work streams remain ambiguous due to weak commit signals.\n",
-                report.metrics.unanchored_feature_count
-            ));
-        }
-    } else {
-        // Standard order when security is clean or medium: summary → health → security note
-        out.push_str("Repository Summary\n\n");
-        out.push_str(&format!(
-            "Your project contains {} commits grouped into {} work streams.\n\n",
-            report.metrics.feature_count * report.metrics.avg_events_per_feature as i64,
-            report.metrics.feature_count,
-        ));
-        if report.metrics.unanchored_feature_count > 0 {
-            out.push_str(&format!(
-                "Most work streams are identifiable, but {} remain ambiguous because commit \
-                 history lacks strong references to tickets, PRs, or feature branches.\n\n",
-                report.metrics.unanchored_feature_count
-            ));
-        } else {
-            out.push_str("All work streams are clearly identified with strong commit signals.\n\n");
-        }
-
-        out.push_str(&format!("Repository Health: {}\n", report.repository_health));
-
-        out.push('\n');
-        out.push_str("Security & Safety\n\n");
-        if report.security.findings.is_empty() {
-            out.push_str("✓  No security issues detected.\n");
-        } else {
-            for f in &report.security.findings {
-                out.push_str(&format!("{}  {}\n", severity_label(&f.severity), f.message));
-            }
-            out.push('\n');
-            out.push_str(&format!("Risk: {}\n", report.security.risk_level));
-        }
+        let status = match report.security.risk_level.as_str() {
+            "Critical" => "Secrets Exposed — act before pushing to a shared repository.",
+            "High" => "Credentials detected — review and remove before sharing.",
+            _ => &report.security.risk_level,
+        };
+        out.push_str(&format!("  Status: {status}\n\n"));
+        out.push_str(&format!("{sep}\n\n"));
     }
 
-    // Combined Recommended Actions — same structure regardless of ordering
+    // ── Project Memory ────────────────────────────────────────────────────
+    let total_commits = report.metrics.feature_count * report.metrics.avg_events_per_feature as i64;
+    let identified = report.metrics.anchored_feature_count;
+    let unknown = report.metrics.unanchored_feature_count;
+
+    out.push_str("Project Memory\n");
+    out.push_str(&format!("{sep}\n\n"));
+    out.push_str(&format!(
+        "Your project has {} commits across {} feature{}.\n\n",
+        total_commits,
+        report.metrics.feature_count,
+        if report.metrics.feature_count == 1 { "" } else { "s" }
+    ));
+    if identified > 0 {
+        out.push_str(&format!(
+            "  ✓  {} feature{} clearly identified\n",
+            identified,
+            if identified == 1 { " is" } else { "s are" }
+        ));
+    }
+    if unknown > 0 {
+        out.push_str(&format!(
+            "  ⚠  {} feature{} with limited or unknown history\n",
+            unknown,
+            if unknown == 1 { " has" } else { "s have" }
+        ));
+    } else {
+        out.push_str("  ✓  All features have clear commit history\n");
+    }
+    out.push('\n');
+    out.push_str(&format!("Repository Health:  {}\n\n", report.repository_health));
+    out.push_str(&format!("{sep}\n\n"));
+
+    // ── What We Found (only when there are issues) ─────────────────────
+    if !report.issues.is_empty() {
+        out.push_str("What We Found\n\n");
+        for issue in &report.issues {
+            out.push_str(&format!("  ⚠  {}\n", issue));
+        }
+        out.push('\n');
+
+        out.push_str("Why It Matters\n\n");
+        if unknown > 0 {
+            out.push_str(&format!(
+                "  {} of your features lack clear commit references. This makes them\n  \
+                 hard to trace later — and confusing for new contributors.\n",
+                unknown
+            ));
+        } else {
+            out.push_str("  Some areas of your commit history could be clearer.\n");
+        }
+        out.push('\n');
+        out.push_str(&format!("{sep}\n\n"));
+    }
+
+    // ── Security Notes — always shown, but tone-matched to severity ──────
+    if !security_leads {
+        out.push_str("Security Notes\n\n");
+        if report.security.findings.is_empty() {
+            out.push_str("  ✓  No credentials or secrets detected.\n");
+        } else {
+            for f in &report.security.findings {
+                out.push_str(&format!("  {}  {}\n", severity_label(&f.severity), f.message));
+            }
+        }
+        out.push('\n');
+        out.push_str(&format!("{sep}\n\n"));
+    }
+
+    // ── What To Do + Expected Result ────────────────────────────────────
     let all_recs_count = report.security.recommendations.len() + report.recommendations.len();
     if all_recs_count > 0 {
-        out.push('\n');
-        out.push_str("Recommended Actions\n");
+        out.push_str("What To Do\n\n");
         let mut idx = 1usize;
         for rec in &report.security.recommendations {
-            out.push_str(&format!("{}. {}\n", idx, rec));
+            out.push_str(&format!("  {idx}. {}\n", rec));
             idx += 1;
         }
         for rec in &report.recommendations {
-            out.push_str(&format!("{}. {}\n", idx, rec.message));
+            out.push_str(&format!("  {idx}. {}\n", rec.message));
             idx += 1;
         }
+        out.push('\n');
 
         let has_anchor_rule = report.recommendations.iter().any(|r| r.id.contains("anchor_coverage"));
         let has_frag_rule = report.recommendations.iter().any(|r| r.id == "fragmentation");
         let has_identity_rule = report.recommendations.iter().any(|r| r.id.contains("identity_consistency"));
         let has_security_recs = !report.security.recommendations.is_empty();
+
         if has_security_recs || has_anchor_rule || has_identity_rule || has_frag_rule {
-            out.push('\n');
-            out.push_str("Expected Result\n");
-            if has_security_recs && has_anchor_rule {
-                out.push_str("Reduced credential exposure risk, fewer ambiguous work streams, and more accurate project history reconstruction.\n");
+            out.push_str("Expected Result\n\n");
+            let msg = if has_security_recs && has_anchor_rule {
+                "  Reduced credential risk and a clearer, more complete project history."
             } else if has_security_recs {
-                out.push_str("Reduced risk of credential exposure and improved repository safety.\n");
+                "  Reduced risk of credential exposure and a safer repository."
             } else if has_anchor_rule && has_identity_rule {
-                out.push_str("Fewer ambiguous work streams, more accurate project history reconstruction, and stronger feature identity signals.\n");
+                "  More features clearly identified, fewer unknown areas, and a stronger project memory."
             } else if has_anchor_rule {
-                out.push_str("Fewer ambiguous work streams and more accurate project history reconstruction.\n");
+                "  More features clearly identified and a more complete project story."
             } else if has_frag_rule {
-                out.push_str("Larger, more coherent work streams with clearer boundaries.\n");
-            } else if has_identity_rule {
-                out.push_str("More consistent work stream identity and improved reconstruction accuracy.\n");
-            }
+                "  Larger, more readable features with clearer commit boundaries."
+            } else {
+                "  More consistent feature identity and improved project history accuracy."
+            };
+            out.push_str(&format!("{msg}\n\n"));
         }
+
+        out.push_str(&format!("{sep}\n\n"));
     } else {
-        out.push('\n');
-        out.push_str("No workflow changes recommended. Your commit practices already support good reconstruction.\n");
+        out.push_str("Your commit practices are solid. No changes recommended.\n\n");
+        out.push_str(&format!("{sep}\n\n"));
     }
 
-    // Details section
-    out.push('\n');
+    // ── Details ──────────────────────────────────────────────────────────
     out.push_str("Details\n");
-    out.push_str("-------\n");
+    out.push_str(&format!("{sep}\n"));
     out.push_str(&format!(
-        "Anchor Coverage: {:.1}%\n",
+        "  Identity Coverage:      {:.1}%\n",
         report.metrics.anchor_coverage * 100.0
     ));
     out.push_str(&format!(
-        "Dominant Anchor Ratio: {:.2}\n",
+        "  Feature Consistency:    {:.2}\n",
         report.metrics.dominant_anchor_ratio
     ));
     out.push_str(&format!(
-        "Anchored Work Streams: {}\n",
+        "  Identified Features:    {}\n",
         report.metrics.anchored_feature_count
     ));
     out.push_str(&format!(
-        "Unidentified Work Streams: {}\n",
+        "  Unknown Features:       {}\n",
         report.metrics.unanchored_feature_count
     ));
     out.push_str(&format!(
-        "Avg Commits per Work Stream: {:.2}\n",
+        "  Avg Commits / Feature:  {:.2}\n",
         report.metrics.avg_events_per_feature
     ));
 
     let has_anchor_rule = report.recommendations.iter().any(|r| r.id.contains("anchor_coverage"));
     let has_identity_rule = report.recommendations.iter().any(|r| r.id.contains("identity_consistency"));
     if has_anchor_rule {
-        let range = if report.metrics.anchor_coverage < DOCTOR_ANCHOR_COV_LOW { "15-25%" } else { "8-15%" };
-        out.push_str(&format!("Expected Anchor Coverage Improvement: {}\n", range));
+        let range = if report.metrics.anchor_coverage < DOCTOR_ANCHOR_COV_LOW { "15–25%" } else { "8–15%" };
+        out.push_str(&format!("  Expected Identity Coverage Gain:  {range}\n"));
     }
     if has_identity_rule {
-        let range = if report.metrics.dominant_anchor_ratio < DOCTOR_DOM_RATIO_POOR { "0.10-0.25" } else { "0.05-0.15" };
-        out.push_str(&format!("Expected Identity Consistency Improvement: {}\n", range));
+        let range = if report.metrics.dominant_anchor_ratio < DOCTOR_DOM_RATIO_POOR { "0.10–0.25" } else { "0.05–0.15" };
+        out.push_str(&format!("  Expected Consistency Gain:        {range}\n"));
     }
 
     out
@@ -1900,98 +1987,107 @@ fn scan_security() -> SecurityReport {
 
 fn severity_label(severity: &str) -> &'static str {
     match severity {
-        "critical" => "🚨 [CRITICAL]",
-        "high"     => "⚠  [HIGH]",
-        "medium"   => "ℹ  [MEDIUM]",
-        _          => "   [INFO]",
+        "critical" => "🚨 Secrets Exposed",
+        "high"     => "⚠  Needs Attention",
+        "medium"   => "ℹ  Worth a Look   ",
+        _          => "   Note           ",
     }
 }
 
 fn render_security_text(report: &SecurityReport) -> String {
     let mut out = String::new();
-    out.push_str("Security Report\n");
-    out.push_str("===============\n\n");
+    let sep = "─".repeat(48);
+
+    out.push_str("Security Notes\n");
+    out.push_str(&format!("{sep}\n\n"));
 
     if report.findings.is_empty() {
-        out.push_str("✓  No security issues detected.\n\n");
+        out.push_str("  ✓  No credentials or secrets detected.\n\n");
     } else {
         out.push_str("Findings\n\n");
         for f in &report.findings {
-            out.push_str(&format!("{}  {}\n", severity_label(&f.severity), f.message));
+            out.push_str(&format!("  {}  {}\n", severity_label(&f.severity), f.message));
         }
         out.push('\n');
     }
 
-    out.push_str(&format!("Risk: {}\n\n", report.risk_level.to_uppercase()));
+    let overall = match report.risk_level.as_str() {
+        "None"     => "Clean",
+        "Critical" => "Secrets Exposed",
+        "High"     => "Needs Attention",
+        "Medium"   => "Worth a Look",
+        other      => other,
+    };
+    out.push_str(&format!("Overall: {overall}\n\n"));
+    out.push_str(&format!("{sep}\n\n"));
 
-    // Checklist summary
+    // What We Checked checklist
     let count_kind = |kind: &str| report.findings.iter().filter(|f| f.kind == kind).count();
     let has_kind = |kind: &str| count_kind(kind) > 0;
-
     let check = |found: bool| if found { "⚠ " } else { "✓ " };
 
-    out.push_str("Secrets Summary\n");
-    out.push_str("---------------\n");
+    out.push_str("What We Checked\n\n");
     let env_count = count_kind("tracked_env_file");
     out.push_str(&format!(
-        "{} .env files tracked      : {}\n",
+        "  {} .env files tracked in git  : {}\n",
         check(env_count > 0),
         if env_count == 0 { "none".to_string() } else { env_count.to_string() }
     ));
     let key_count = count_kind("tracked_key_file") + count_kind("private_key_content");
     out.push_str(&format!(
-        "{} Private keys             : {}\n",
+        "  {} Private keys in history    : {}\n",
         check(key_count > 0),
         if key_count == 0 { "none".to_string() } else { key_count.to_string() }
     ));
     let openai_count = count_kind("openai_key");
     out.push_str(&format!(
-        "{} OpenAI keys              : {}\n",
+        "  {} OpenAI keys                : {}\n",
         check(has_kind("openai_key")),
         if openai_count == 0 { "none".to_string() } else { openai_count.to_string() }
     ));
     let github_count = count_kind("github_token");
     out.push_str(&format!(
-        "{} GitHub tokens            : {}\n",
+        "  {} GitHub tokens              : {}\n",
         check(has_kind("github_token")),
         if github_count == 0 { "none".to_string() } else { github_count.to_string() }
     ));
     let aws_count = count_kind("aws_key");
     out.push_str(&format!(
-        "{} AWS keys                 : {}\n",
+        "  {} AWS keys                   : {}\n",
         check(has_kind("aws_key")),
         if aws_count == 0 { "none".to_string() } else { aws_count.to_string() }
     ));
     let google_count = count_kind("google_key");
     out.push_str(&format!(
-        "{} Google API keys          : {}\n",
+        "  {} Google API keys            : {}\n",
         check(has_kind("google_key")),
         if google_count == 0 { "none".to_string() } else { google_count.to_string() }
     ));
     let slack_count = count_kind("slack_token");
     out.push_str(&format!(
-        "{} Slack tokens             : {}\n",
+        "  {} Slack tokens               : {}\n",
         check(has_kind("slack_token")),
         if slack_count == 0 { "none".to_string() } else { slack_count.to_string() }
     ));
     let db_count = count_kind("db_credentials");
     out.push_str(&format!(
-        "{} DB credentials in code   : {}\n",
+        "  {} Database credentials       : {}\n",
         check(has_kind("db_credentials")),
         if db_count == 0 { "none".to_string() } else { db_count.to_string() }
     ));
     let gitignore_ok = !has_kind("no_gitignore") && !has_kind("missing_env_in_gitignore");
     out.push_str(&format!(
-        "{} .gitignore covers .env   : {}\n",
+        "  {} .gitignore covers .env     : {}\n",
         check(!gitignore_ok),
         if gitignore_ok { "yes" } else { "no" }
     ));
     out.push('\n');
 
     if !report.recommendations.is_empty() {
-        out.push_str("Recommended Actions\n");
+        out.push_str(&format!("{sep}\n\n"));
+        out.push_str("What To Do\n\n");
         for (i, rec) in report.recommendations.iter().enumerate() {
-            out.push_str(&format!("{}. {}\n", i + 1, rec));
+            out.push_str(&format!("  {}. {}\n", i + 1, rec));
         }
         out.push('\n');
     }
@@ -2066,7 +2162,7 @@ fn collect_git_events_from_log(store: &EventStore, raw: &str) -> Result<usize> {
             id: Uuid::new_v4(),
             timestamp,
             event_type: EventType::GitCommit,
-            project_id: "devreplay".to_string(),
+            project_id: "evolith".to_string(),
             payload,
             path: None,
             branch,
@@ -2135,7 +2231,7 @@ mod tests {
     #[test]
     fn feature_rebuild_flow_groups_and_persists_features() -> Result<()> {
         let mut db_path = std::env::temp_dir();
-        db_path.push(format!("devreplay-cli-flow-{}.db", Uuid::new_v4()));
+        db_path.push(format!("evolith-cli-flow-{}.db", Uuid::new_v4()));
         let store = EventStore::new(&db_path)?;
 
         let events = vec![
@@ -2205,7 +2301,7 @@ mod tests {
     #[test]
     fn collect_git_is_idempotent() -> Result<()> {
         let mut db_path = std::env::temp_dir();
-        db_path.push(format!("devreplay-collect-idempotent-{}.db", Uuid::new_v4()));
+        db_path.push(format!("evolith-collect-idempotent-{}.db", Uuid::new_v4()));
         let store = EventStore::new(&db_path)?;
 
         let sample_log = concat!(
@@ -2230,7 +2326,7 @@ mod tests {
     #[test]
     fn repeated_git_collection_does_not_change_counts() -> Result<()> {
         let mut db_path = std::env::temp_dir();
-        db_path.push(format!("devreplay-repeat-collect-{}.db", Uuid::new_v4()));
+        db_path.push(format!("evolith-repeat-collect-{}.db", Uuid::new_v4()));
         let store = EventStore::new(&db_path)?;
         let sample_log = concat!(
             "a1\x1f2026-05-31T10:00:00Z\x1fAlice\x1fHEAD -> feature/a\x1fAUTH-1 init\x1e",
@@ -2249,7 +2345,7 @@ mod tests {
     #[test]
     fn run_metrics_are_populated() -> Result<()> {
         let mut db_path = std::env::temp_dir();
-        db_path.push(format!("devreplay-run-metrics-{}.db", Uuid::new_v4()));
+        db_path.push(format!("evolith-run-metrics-{}.db", Uuid::new_v4()));
         let store = EventStore::new(&db_path)?;
 
         let events = vec![
@@ -2346,13 +2442,12 @@ mod tests {
         let evidence_strength = estimate_evidence_strength(&feature, &events);
         let health = classify_feature_health(&feature, 0.82, &evidence_strength);
         let explanation = build_feature_explanation(&feature, &events, 0.82, &evidence_strength, health);
-        assert!(explanation.contains("Feature: Pattern interview"));
-        assert!(explanation.contains("Feature Health:"));
-        assert!(explanation.contains("Anchor Confidence: 0.82"));
-        assert!(explanation.contains("Evidence Strength:"));
-        assert!(explanation.contains("PR anchors: PR-12"));
-        assert!(explanation.contains("feature/interview"));
-        assert!(explanation.contains("Strong anchor agreement") || explanation.contains("Moderate anchor agreement"));
+        assert!(explanation.contains("Pattern interview"), "explanation must include feature title");
+        assert!(explanation.contains("What happened?"), "explanation must include What happened section");
+        assert!(explanation.contains("Why it matters"), "explanation must include Why it matters section");
+        assert!(explanation.contains("What to do"), "explanation must include What to do section");
+        assert!(explanation.contains("Identity Clarity:"), "explanation must include Identity Clarity");
+        assert!(explanation.contains("PR-12") || explanation.contains("feature/interview"), "explanation must reference linked identities");
     }
 
     #[test]
@@ -2376,7 +2471,7 @@ mod tests {
         let events = vec![make_event(0, "src/aiml.ts", "feature/aiml-engine", None, None)];
         let evidence_strength = estimate_evidence_strength(&feature, &events);
         let health = classify_feature_health(&feature, 0.85, &evidence_strength);
-        assert_eq!(health, "Weak Evidence");
+        assert_eq!(health, "Limited History");
     }
 
     // --- evolith doctor tests ---
@@ -2430,7 +2525,7 @@ mod tests {
         let run = make_run(0.75, 0.85, 9, 8, 1, 8.5);
         let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(8)).collect();
         let report = build_doctor_report(&run, &features, SecurityReport::empty());
-        assert_eq!(report.repository_health, "Good");
+        assert_eq!(report.repository_health, "Great Shape");
         assert!(report.scoring.overall_score >= 0.75);
         assert!(report.recommendations.is_empty());
     }
@@ -2442,8 +2537,8 @@ mod tests {
         let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(4)).collect();
         let report = build_doctor_report(&run, &features, SecurityReport::empty());
         assert!(
-            report.repository_health == "Moderate" || report.repository_health == "Poor",
-            "expected Moderate or Poor, got {}",
+            report.repository_health == "Room to Improve" || report.repository_health == "Needs Attention",
+            "expected Room to Improve or Needs Attention, got {}",
             report.repository_health
         );
         assert!(!report.recommendations.is_empty());
@@ -2491,9 +2586,9 @@ mod tests {
         let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(4)).collect();
         let report = build_doctor_report(&run, &features, SecurityReport::empty());
         let text = render_doctor_text(&report);
-        assert!(text.starts_with("Repository Summary"), "text output must start with Repository Summary");
+        assert!(text.starts_with("Project Memory"), "text output must start with Project Memory");
         let health_pos = text.find("Repository Health:").unwrap();
-        let summary_pos = text.find("Repository Summary").unwrap();
+        let summary_pos = text.find("Project Memory").unwrap();
         assert!(summary_pos < health_pos, "summary must appear before health score");
         assert!(!text.contains("anchor_coverage"), "raw metric keys must not appear in text output");
         assert!(!text.contains("dominant_anchor_ratio"), "raw metric keys must not appear in text output");
@@ -2505,9 +2600,9 @@ mod tests {
         let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(6)).collect();
         let report = build_doctor_report(&run, &features, SecurityReport::empty());
         let text = render_doctor_text(&report);
-        assert!(text.contains("Details\n-------"), "text output must contain Details section");
-        assert!(text.contains("Anchor Coverage:"), "Details must include Anchor Coverage");
-        assert!(text.contains("Dominant Anchor Ratio:"), "Details must include Dominant Anchor Ratio");
+        assert!(text.contains("Details\n"), "text output must contain Details section");
+        assert!(text.contains("Identity Coverage:"), "Details must include Identity Coverage");
+        assert!(text.contains("Feature Consistency:"), "Details must include Feature Consistency");
     }
 
     #[test]
@@ -2671,8 +2766,8 @@ mod tests {
     fn security_text_report_starts_with_security_report_header() {
         let report = SecurityReport::empty();
         let text = render_security_text(&report);
-        assert!(text.starts_with("Security Report\n"), "security text must start with 'Security Report'");
-        assert!(text.contains("✓  No security issues detected."));
+        assert!(text.starts_with("Security Notes\n"), "security text must start with 'Security Notes'");
+        assert!(text.contains("✓  No credentials or secrets detected."));
     }
 
     #[test]
@@ -2681,8 +2776,8 @@ mod tests {
         let features: Vec<Feature> = (0..9).map(|_| make_feature_with_commits(8)).collect();
         let report = build_doctor_report(&run, &features, SecurityReport::empty());
         let text = render_doctor_text(&report);
-        assert!(text.contains("Security & Safety"), "doctor text must include Security & Safety section");
-        assert!(text.contains("✓  No security issues detected."), "clean repo should show no issues");
+        assert!(text.contains("Security Notes"), "doctor text must include Security Notes section");
+        assert!(text.contains("✓  No credentials or secrets detected."), "clean repo should show no issues");
     }
 
     #[test]
@@ -2702,11 +2797,11 @@ mod tests {
         };
         let report = build_doctor_report(&run, &features, sec);
         let text = render_doctor_text(&report);
-        assert!(text.contains("Risk: High"), "should show risk level when findings exist");
+        assert!(text.contains("Needs Attention") || text.contains("Secrets Exposed"), "should show attention status when findings exist");
         assert!(text.contains(".env.production is tracked by git"), "should show finding message");
-        // Security recommendation should appear before workflow recommendations
-        let sec_pos = text.find("Remove .env.production").unwrap();
+        // Security alert leads when High/Critical, health appears after
+        let sec_pos = text.find("Security Alert").unwrap();
         let health_pos = text.find("Repository Health:").unwrap();
-        assert!(sec_pos > health_pos, "security rec should appear after health header");
+        assert!(sec_pos < health_pos, "security alert should appear before health section when severity is high");
     }
 }

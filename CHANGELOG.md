@@ -7,7 +7,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 ## [0.1.0-alpha] - 2026-05-31
 
 ### Added
-- Primary CLI command renamed to `evolith` with deprecated compatibility alias `devreplay`.
+- Primary CLI command: `evolith`.
 - Git collector command: `evolith collect git`.
 - Feature reconstruction pipeline: `events -> anchors -> episodes -> features`.
 - Feature persistence tables: `features`, `feature_assignments`, `feature_runs`.

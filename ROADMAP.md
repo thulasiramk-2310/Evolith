@@ -3,7 +3,6 @@
 Naming decision:
 - Product name: `Evolith`
 - Primary CLI command: `evolith`
-- Backward-compatible alias: `devreplay` (deprecated in alpha, removal planned after transition window).
 
 ## v0.1.0-alpha (Current)
 

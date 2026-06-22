@@ -717,7 +717,7 @@ mod tests {
 
     fn temp_db_path(name: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("devreplay-{name}-{}.db", Uuid::new_v4()));
+        p.push(format!("evolith-{name}-{}.db", Uuid::new_v4()));
         p
     }
 
