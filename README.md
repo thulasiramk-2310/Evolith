@@ -34,9 +34,19 @@ sudo mv evolith /usr/local/bin/
 ```
 
 **Windows (x64)**
+```powershell
+irm https://raw.githubusercontent.com/thulasiramk-2310/Evolith/main/install.ps1 | iex
+```
+
+No PATH editing. No unzipping. Opens a new terminal and `evolith` is ready.
+
+<details>
+<summary>Manual install (if you prefer)</summary>
+
 1. Download [`evolith-windows-x64.zip`](https://github.com/thulasiramk-2310/Evolith/releases/latest/download/evolith-windows-x64.zip)
-2. Unzip
-3. Move `evolith.exe` to a folder in your PATH (e.g. `C:\tools\`)
+2. Unzip and move `evolith.exe` to a folder in your PATH (e.g. `C:\tools\`)
+
+</details>
 
 Verify:
 ```bash
