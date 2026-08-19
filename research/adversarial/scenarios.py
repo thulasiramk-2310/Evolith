@@ -466,6 +466,76 @@ def scenario_e2b_twin_with_branch_episodes(num_events=1000):
         current_time += timedelta(minutes=random.randint(10, 40))
     return events
 
+def scenario_e2d_realistic_ticket_anchors(
+    num_events=1000,
+    coverage=0.45,
+    mislabel_rate=0.10,
+    shared_ticket_rate=0.20,
+):
+    """
+    Scenario E2D: Feature twins with *realistic* ticket anchors.
+
+    E2A gives every event a ticket and maps tickets one-to-one onto features, so
+    grouping by ticket_id reproduces the label exactly. Real repositories do not
+    look like that. Here the anchor is correlated with the feature but is not a
+    relabeling of it:
+
+    - `coverage`: fraction of events that carry a ticket at all. The rest are
+      unanchored, which is the common case in practice.
+    - `shared_ticket_rate`: fraction that carry an epic-style ticket touched by
+      both features, so the mapping is many-to-many rather than bijective.
+    - `mislabel_rate`: fraction that carry the *other* feature's ticket, which is
+      what happens when a developer copies a branch name or amends the wrong
+      commit.
+
+    A method that genuinely reconstructs features should degrade gracefully here
+    rather than collapsing to the anchor.
+    """
+    events = []
+    shared_files = ["auth.ts", "jwt.ts", "session.ts"]
+    branch_pool = ["feat/auth", "feat/auth-v2", "main"]
+    features = [
+        {"name": "Authentication Refactor", "ticket": "AUTH-123"},
+        {"name": "Authentication Migration", "ticket": "AUTH-456"},
+    ]
+    epic_ticket = "AUTH-100"
+
+    current_time = datetime(2026, 5, 1, 9, 0, 0)
+    remaining = num_events
+    active_idx = 0
+    while remaining > 0:
+        feat = features[active_idx]
+        other = features[1 - active_idx]
+        burst = min(remaining, random.randint(10, 25))
+        for _ in range(burst):
+            current_time += timedelta(minutes=random.randint(1, 3))
+
+            ticket = ""
+            if random.random() < coverage:
+                roll = random.random()
+                if roll < shared_ticket_rate:
+                    ticket = epic_ticket
+                elif roll < shared_ticket_rate + mislabel_rate:
+                    ticket = other["ticket"]
+                else:
+                    ticket = feat["ticket"]
+
+            events.append(
+                build_event(
+                    feat["name"],
+                    random.choice(shared_files),
+                    random.choice(branch_pool),
+                    current_time,
+                    msg="auth update",
+                    ticket_id=ticket,
+                )
+            )
+        remaining -= burst
+        active_idx = 1 - active_idx
+        current_time += timedelta(minutes=random.randint(10, 40))
+    return events
+
+
 def scenario_e2c_twin_with_pr_anchors(num_events=1000):
     """
     Scenario E2C: Feature twins with PR anchors only.

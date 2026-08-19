@@ -1,3 +1,22 @@
+"""
+DEPRECATED for reporting. Kept so historical numbers stay reproducible.
+
+Do not cite scores from this file. Two defects make its output misleading:
+
+1. It only ever calls `build_louvain_clusters`. The DBSCAN and connected-
+   components baselines in `notebooks/clustering_experiments.py` are imported
+   nowhere and never run, so the "comparison" is one method against itself on
+   different datasets.
+2. Several scenarios assign `ground_truth` and an input field (`branch`,
+   `ticket_id`, `pr_id`) from the same dict literal, so the input determines the
+   label. Every ARI 1.0000 in this file is reproduced exactly by a one-line
+   `GROUP BY` on that field.
+
+Use `adversarial/benchmark_fair.py`, which runs all methods on the same events
+and prints a leakage report before any score. See the addendum in
+`research/reports/RESEARCH-005-anchor-assisted-reconstruction.md`.
+"""
+
 import sys
 import os
 import random

@@ -1,3 +1,5 @@
 /target
 **/*.rs.bk
 .devreplay/
+__pycache__/
+*.pyc
