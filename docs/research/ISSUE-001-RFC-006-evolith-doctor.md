@@ -6,6 +6,10 @@ Implement repository-level health assessment and actionable recommendations base
 
 This command should help developers understand how trustworthy reconstruction is and what changes would improve future reconstruction quality.
 
+The default text output should translate metrics into meaning. Raw metric names are useful for JSON and diagnostics, but they should not be the first thing a developer sees.
+
+The primary UX test: can a developer understand the state of their project history in 30 seconds?
+
 ## Commands
 
 ```bash
@@ -115,27 +119,33 @@ Larger and more coherent reconstructed features.
 ## Text Output Example
 
 ```text
+Repository Summary
+
+Your project contains 57 commits grouped into 9 work streams.
+
+Most work streams are identifiable, but 4 remain ambiguous because commit history lacks strong references to tickets, PRs, or feature branches.
+
 Repository Health: Moderate
 
-Metrics:
-- Anchor Coverage: 22.8%
-- Dominant Anchor Ratio: 0.56
-- Anchored Features: 5
-- Unanchored Features: 4
-
-Issues:
-- Low anchor coverage
-- Weak feature identity
-
-Recommendations:
+Recommended Actions
 1. Include ticket references in commit messages.
 2. Reference PR numbers consistently.
 3. Use descriptive branch naming.
 
-Expected Impact:
-- Anchor Coverage +10% to +25%
-- Dominant Anchor Ratio +0.10 to +0.25
+Expected Result
+Fewer ambiguous work streams and more accurate project history reconstruction.
+
+Details
+-------
+Anchor Coverage: 22.8%
+Dominant Anchor Ratio: 0.56
+Anchored Features: 5
+Unanchored Features: 4
+Expected Anchor Coverage Improvement: 10% to 25%
+Expected Identity Consistency Improvement: 0.10 to 0.25
 ```
+
+Avoid exposing internal labels such as `Episode Candidate` in default output. Prefer user-facing labels such as `Unidentified Work Stream` or `Needs More Signals`.
 
 ## JSON Output
 
@@ -148,6 +158,8 @@ Must expose:
 - `expected_impacts`
 
 Use stable field names suitable for future TUI or desktop UI consumption.
+
+JSON should preserve raw metric names such as `anchor_coverage`, `dominant_anchor_ratio`, and `avg_events_per_feature` for automation.
 
 ## Validation
 
@@ -168,6 +180,9 @@ Expected behavior:
 - `evolith doctor --json` implemented
 - Deterministic health classification
 - Deterministic recommendations
+- Default text output can be understood in roughly 30 seconds
+- Default text output leads with explanations, not raw metric labels
+- Internal grouping labels are translated into user-facing terminology
 - Fragmentation rule triggers when `avg_events_per_feature < 2.0` and produces consolidation recommendations
 - JSON contract documented
 - Unit tests added

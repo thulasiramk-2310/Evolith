@@ -17,9 +17,11 @@ May 31, 2026
 ## Abstract
 Evolith can reconstruct features, score trust, and explain why events were grouped. It cannot yet answer the next user question: "What should I change in my workflow to improve reconstruction quality?" This RFC introduces a deterministic Repository Health & Recommendations Engine exposed through `evolith doctor` and `evolith doctor --json`.
 
-The engine converts existing reconstruction metrics into actionable guidance. It closes the loop:
+The engine converts existing reconstruction metrics into actionable, plain-language guidance. Human-facing output should explain what the numbers mean before exposing the numbers themselves. It closes the loop:
 
 `Collect -> Reconstruct -> Explain -> Assess -> Recommend`
+
+The primary UX test is whether a developer can understand the state of their project history in 30 seconds.
 
 ## Context
 From M2/M3 validation:
@@ -35,6 +37,8 @@ Current gap:
 - Produce deterministic recommendations (no LLM dependency).
 - Offer human-readable and JSON outputs for CLI and automation.
 - Make advice operational and measurable (expected impact ranges).
+- Keep raw metric labels out of the primary human output unless the user requests details.
+- Lead human output with project-history meaning before health scores or metrics.
 
 ## Non-Goals
 - Automatic modification of commit history or branch names.
@@ -60,26 +64,32 @@ evolith doctor --json
 
 ## Example Output
 ```text
+Repository Summary
+
+Your project contains 57 commits grouped into 9 work streams.
+
+Most work streams are identifiable, but 4 remain ambiguous because commit history lacks strong references to tickets, PRs, or feature branches.
+
 Repository Health: Moderate
 
+Recommended Actions
+1. Add ticket IDs to commit messages.
+2. Use more descriptive branch names.
+3. Reference PR numbers consistently.
+
+Expected Result
+Fewer ambiguous work streams and more accurate project history reconstruction.
+
+Details
+-------
 Anchor Coverage: 22.8%
 Dominant Anchor Ratio: 0.56
 Weak Evidence Features: 4/9
-
-Issues:
-- 77.2% of events lack anchors
-- 4 features are weakly supported
-- fragmentation risk is moderate (avg events/feature 6.33)
-
-Recommendations:
-1. Include ticket IDs in commit messages (AUTH-123 style)
-2. Use consistent branch naming (feature/<domain>-<goal>)
-3. Reference PR IDs in merge/commit messages
-
-Expected Impact:
-Anchor Coverage +15-25%
-Dominant Anchor Ratio +0.05 to +0.15
+Expected Anchor Coverage Improvement: 15-25%
+Expected Identity Consistency Improvement: 0.05-0.15
 ```
+
+The human output should translate technical metric names into meaning before showing details. For example, prefer "Only 23% of commits contain identifiable anchors" in the summary over leading with "Anchor Coverage: 22.8%".
 
 ## Health Signals
 
@@ -203,6 +213,8 @@ If `avg_events_per_feature > 25.0`:
 }
 ```
 
+JSON output intentionally preserves stable metric names for automation, tests, and future UI clients. The CLI's default text output should use explanatory labels instead.
+
 ## Data Dependencies
 - `feature_runs` (latest completed run metrics).
 - `features` + evidence + existing feature health classification.
@@ -240,4 +252,4 @@ No schema migration is required for initial version.
 - Run-to-run improvement tracking from prior doctor outputs.
 - Monorepo-aware recommendation rules.
 - Collector-aware recommendations once plugin system lands (v0.2.0+).
-
+- Advanced/detail view for raw metrics behind a flag such as `--details`.
